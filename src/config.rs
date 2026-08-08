@@ -135,6 +135,10 @@ pub struct MediaConfig {
     /// Force a graphics protocol instead of probing the terminal.
     /// One of `auto`, `kitty`, `sixel`, `iterm2`, `halfblocks`.
     pub protocol: String,
+    /// Cell size in pixels, as `[width, height]`. Multiplexers often refuse the
+    /// cell-size query even when they pass graphics through, and an image needs
+    /// this only to work out how many rows it should occupy.
+    pub cell_size: [u16; 2],
 }
 
 impl Default for MediaConfig {
@@ -144,6 +148,7 @@ impl Default for MediaConfig {
             max_rows: 16,
             max_bytes: 16 * 1024 * 1024,
             protocol: "auto".to_string(),
+            cell_size: [10, 20],
         }
     }
 }

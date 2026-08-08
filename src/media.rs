@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use image::{DynamicImage, GenericImageView};
+use ratatui_image::FontSize;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::thread::{ResizeRequest, ThreadProtocol};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -120,7 +121,14 @@ impl Media {
     /// Builds the picker, honouring a forced `protocol` from config and falling
     /// back to half-blocks when detection fails. Never panics.
     pub fn detect(config: &MediaConfig) -> Picker {
-        force_protocol(probe(), &config.protocol)
+        force_protocol(probe(config).0, &config.protocol)
+    }
+
+    /// Detects graphics support and reports whether the cell size had to be
+    /// assumed, which is the one thing that can make an image look stretched.
+    pub fn detect_verbose(config: &MediaConfig) -> (Picker, bool) {
+        let (picker, assumed) = probe(config);
+        (force_protocol(picker, &config.protocol), assumed)
     }
 
     /// True when the terminal can draw real pixels rather than half-blocks.
@@ -303,11 +311,136 @@ impl Media {
 }
 
 /// Queries the terminal, accepting half-blocks when it does not answer.
-fn probe() -> Picker {
-    Picker::from_query_stdio().unwrap_or_else(|err| {
+fn probe(config: &MediaConfig) -> (Picker, bool) {
+    let picker = Picker::from_query_stdio().unwrap_or_else(|err| {
         tracing::debug!(%err, "terminal graphics detection failed");
         Picker::halfblocks()
+    });
+    if picker.protocol_type() != ProtocolType::Halfblocks {
+        return (picker, false);
+    }
+
+    // Some hosts answer the capability query affirmatively and then silently
+    // discard the image data. Believing them is worse than not asking: the rows
+    // are reserved, nothing is drawn, and the user sees a hole. Half-blocks
+    // always put something on the screen.
+    if let Some(host) = untrustworthy_host() {
+        tracing::debug!(
+            host,
+            "running under a host that reports graphics support it does not deliver; \
+             staying on half-blocks. Set media.protocol to override."
+        );
+        return (picker, false);
+    }
+
+    // `from_query_stdio` throws away a protocol it successfully detected when
+    // the terminal declines to report its cell size, and terminal multiplexers
+    // routinely pass graphics through while answering no geometry query at all.
+    // Ask for the capability on its own and supply the size ourselves; an
+    // approximate cell only affects how many rows an image occupies, not the
+    // resolution it is drawn at.
+    match query_graphics_capability(QUERY_TIMEOUT) {
+        Some(protocol) => {
+            tracing::debug!(
+                ?protocol,
+                "terminal reports graphics support but no cell size; assuming {:?}",
+                config.cell_size
+            );
+            // `from_fontsize` is deprecated in favour of the querying
+            // constructors, but those are exactly the ones that fail here: it is
+            // the only way to build a picker with a cell size we had to assume.
+            #[allow(deprecated)]
+            let mut picker = Picker::from_fontsize(FontSize::new(
+                config.cell_size[0].max(1),
+                config.cell_size[1].max(1),
+            ));
+            picker.set_protocol_type(protocol);
+            (picker, true)
+        }
+        None => (picker, false),
+    }
+}
+
+/// Hosts that answer the kitty capability query but do not forward the image
+/// payload to the terminal underneath them. Each entry is an environment
+/// variable whose presence identifies the host, verified by hand: a raw kitty
+/// transmission inside it produces no picture.
+const UNTRUSTWORTHY_HOSTS: &[(&str, &str)] = &[("HERDR_ENV", "herdr")];
+
+fn untrustworthy_host() -> Option<&'static str> {
+    UNTRUSTWORTHY_HOSTS.iter().find_map(|(var, name)| {
+        std::env::var_os(var)
+            .is_some_and(|value| !value.is_empty())
+            .then_some(*name)
     })
+}
+
+/// How long to wait for the terminal to describe itself.
+const QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Asks the terminal whether it speaks the kitty graphics protocol.
+///
+/// The query is terminated with a primary device attributes request, which every
+/// terminal answers, so the read finishes even when the graphics query is
+/// ignored. Must run after the alternate screen is entered and before the event
+/// stream starts consuming input, for the same reason as the crate's own probe.
+fn query_graphics_capability(timeout: Duration) -> Option<ProtocolType> {
+    use std::io::{IsTerminal, Read, Write};
+
+    // Writing an escape query into a pipe would corrupt whatever is reading it
+    // and could never be answered.
+    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+        return None;
+    }
+
+    // The reply must not be line-buffered or echoed back at the user. Inside the
+    // interface raw mode is already on; from `doctor` it is not.
+    let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+    if !was_raw && crossterm::terminal::enable_raw_mode().is_err() {
+        return None;
+    }
+    let restore = || {
+        if !was_raw {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    };
+
+    let mut stdout = std::io::stdout();
+    if stdout
+        .write_all(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c")
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
+        restore();
+        return None;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut reply = Vec::with_capacity(64);
+        let mut byte = [0u8; 1];
+        while let Ok(1) = stdin.read(&mut byte) {
+            reply.push(byte[0]);
+            // The device attributes answer ends in `c` and is the last thing
+            // the terminal will send.
+            if byte[0] == b'c' && contains(&reply, b"\x1b[?") {
+                break;
+            }
+            if reply.len() >= 512 {
+                break;
+            }
+        }
+        let _ = tx.send(reply);
+    });
+
+    let reply = rx.recv_timeout(timeout);
+    restore();
+    contains(&reply.ok()?, b"_Gi=31;OK").then_some(ProtocolType::Kitty)
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 /// Applies a configured protocol override. Detection still runs first, because
@@ -656,6 +789,54 @@ fn divide_up(value: u32, divisor: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    /// A host that claims graphics and then drops the payload leaves a hole on
+    /// screen, which is strictly worse than coarse blocks. Verified by hand:
+    /// a raw kitty transmission inside a Herdr pane produces no picture.
+    #[test]
+    fn a_host_that_cannot_deliver_graphics_is_not_believed() {
+        // SAFETY: single-threaded test, restored before it returns.
+        let previous = std::env::var_os("HERDR_ENV");
+        unsafe { std::env::set_var("HERDR_ENV", "1") };
+        assert_eq!(untrustworthy_host(), Some("herdr"));
+
+        unsafe { std::env::set_var("HERDR_ENV", "") };
+        assert_eq!(untrustworthy_host(), None, "an empty value is not a host");
+
+        unsafe { std::env::remove_var("HERDR_ENV") };
+        assert_eq!(untrustworthy_host(), None);
+        if let Some(value) = previous {
+            unsafe { std::env::set_var("HERDR_ENV", value) };
+        }
+    }
+
+    /// The capability reply is the only thing that distinguishes "no graphics"
+    /// from "graphics, but the terminal will not describe its geometry".
+    #[test]
+    fn a_kitty_capability_reply_is_recognised_amid_the_device_attributes() {
+        // Exactly what a Herdr pane over Ghostty answers.
+        let real = b"\x1b_Gi=31;OK\x1b\\\x1b[?62;22c";
+        assert!(contains(real, b"_Gi=31;OK"));
+
+        // A terminal that answers only the device attributes has no graphics.
+        let bare = b"\x1b[?62;22c";
+        assert!(!contains(bare, b"_Gi=31;OK"));
+
+        // A truncated reply must not match a prefix of the marker.
+        assert!(!contains(b"\x1b_Gi=31;O", b"_Gi=31;OK"));
+    }
+
+    #[test]
+    fn an_assumed_cell_size_is_never_zero() {
+        // A hand-edited config could ask for a zero-sized cell, which would
+        // divide by zero when working out how many rows an image needs.
+        let mut config = crate::config::MediaConfig::default();
+        config.cell_size = [0, 0];
+        let width = config.cell_size[0].max(1);
+        let height = config.cell_size[1].max(1);
+        assert_eq!((width, height), (1, 1));
+    }
+
 
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;

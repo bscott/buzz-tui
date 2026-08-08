@@ -240,22 +240,25 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
 
     // Probing writes escape sequences and reads the replies, which is safe here
     // because doctor owns the terminal and never enters the alternate screen.
+    let (picker, assumed_cell) = Media::detect_verbose(&config.media);
     let media = Media::new(
-        Media::detect(&config.media),
+        picker,
         config.media.clone(),
         paths.media.clone(),
         Arc::new(Store::open(&paths.db, &"0".repeat(64))?),
         mpsc::unbounded_channel().0,
     );
-    println!(
-        "graphics   {}{}",
-        media.protocol_name(),
-        if media.high_resolution() {
-            ""
-        } else {
-            "  (no pixel protocol detected; images use unicode blocks)"
-        }
-    );
+    let (cell_w, cell_h) = media.font_size();
+    let note = if !media.high_resolution() {
+        "  (no pixel protocol detected; images use unicode blocks)".to_string()
+    } else if assumed_cell {
+        format!(
+            "  (cell {cell_w}x{cell_h} assumed — this terminal answers the capability\n           query but not the cell-size one; set media.cell_size if images look stretched)"
+        )
+    } else {
+        format!("  (cell {cell_w}x{cell_h})")
+    };
+    println!("graphics   {}{note}", media.protocol_name());
 
     let (file, mut diagnostics) = KeyFile::load(&paths.root.join("keys.toml"));
     let keymap = Keymap::with_overrides(file);

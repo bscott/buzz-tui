@@ -114,6 +114,7 @@ inline_images = true
 max_rows = 16           # tallest an inline image may be
 max_bytes = 16777216
 protocol = "auto"       # auto | kitty | sixel | iterm2 | halfblocks
+cell_size = [10, 20]    # assumed only when the terminal will not report one
 
 # Optional: override individual palette tokens on top of the chosen theme.
 [theme]
@@ -196,15 +197,37 @@ inside a DM rather than falling back to a public event that would leak metadata.
 
 ## Images
 
-At startup the terminal is probed for kitty, sixel, and iTerm2 graphics. Whatever
-it reports is what gets used; `buzztui doctor` prints the result. Set
-`media.protocol` to force one. Images are downloaded once into `media/`, decoded
-off the render path, and dropped from memory when they scroll away.
+At startup the terminal is asked what it can draw, and `buzztui doctor` prints
+the answer along with the cell size it will use:
+
+```
+graphics   kitty  (cell 9x18)
+```
+
+Images are downloaded once into `media/`, decoded off the render path, and
+dropped from memory when they scroll away. Anything the terminal cannot draw
+with pixels falls back to unicode half-blocks, which always render.
+
+Two things are worth knowing.
+
+**Some terminals will not report their cell size.** Multiplexers in particular
+answer the capability query but refuse the geometry one, and the underlying
+library discards a perfectly good protocol when that happens. `buzztui` asks
+again on its own and assumes `media.cell_size` — only the number of rows an
+image occupies depends on it, not the resolution. If pictures look stretched,
+set it to your font's real cell size.
+
+**Some hosts claim graphics support they do not deliver.** Herdr answers the
+kitty capability query with `OK` and then drops the image payload, so a client
+that believes it reserves rows and draws nothing. `buzztui` therefore stays on
+half-blocks inside Herdr rather than leaving a hole in the timeline. Set
+`media.protocol = "kitty"` to override that if a future version passes graphics
+through.
 
 ## Development
 
 ```bash
-cargo test          # 145 tests, no network
+cargo test          # 148 tests, no network
 cargo run -- doctor
 ```
 
