@@ -1,0 +1,62 @@
+[package]
+name = "buzz-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "A high-resolution terminal client for Buzz relays"
+repository = "https://github.com/bscott/buzz-tui"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "buzztui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "signal"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots", "url"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+# Default features probe for a system libchafa at build time; the four graphics
+# protocols compile unconditionally, so disabling them costs nothing.
+ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults", "tokio"] }
+
+rusqlite = { version = "0.40", features = ["bundled"] }
+parking_lot = "0.12"
+
+nostr = { version = "0.45", default-features = false, features = [
+    "std",
+    "rand",
+    "os-rng",
+    "nip44",
+    "nip59",
+] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "webpki-roots", "http2", "charset"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+unicode-width = "0.2"
+directories = "6"
+nucleo-matcher = "0.3"
+open = "5"
+arboard = { version = "3", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
