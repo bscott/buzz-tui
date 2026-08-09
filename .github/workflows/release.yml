@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build, for rehearsing a release"
+        description: "Existing tag to build, for rehearsing a release"
         required: true
 
 permissions:
@@ -16,8 +16,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Which tag is being released is not obvious: on a manual run `ref_name` is
+  # the branch the workflow was launched from, not the tag. Resolving it once,
+  # and refusing anything that does not match the crate version, keeps every
+  # later job from guessing.
+  resolve:
+    name: resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: choose the tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag='${{ inputs.tag }}'
+          else
+            tag='${{ github.ref_name }}'
+          fi
+          case "$tag" in
+            v[0-9]*) ;;
+            *) echo "::error::expected a tag like v1.2.3, got '$tag'"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: tag must match the crate version
+        shell: bash
+        run: |
+          set -euo pipefail
+          crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          tag='${{ steps.tag.outputs.tag }}'
+          if [ "v$crate" != "$tag" ]; then
+            echo "::error::$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "releasing $tag"
+
   build:
     name: ${{ matrix.target }}
+    needs: resolve
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -40,6 +83,8 @@ jobs:
             cross: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -58,6 +103,7 @@ jobs:
       - name: build
         shell: bash
         run: |
+          set -euo pipefail
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --locked --target ${{ matrix.target }}
           else
@@ -65,20 +111,17 @@ jobs:
           fi
 
       - name: package
-        id: package
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
-          name="buzztui-${tag}-${{ matrix.target }}"
+          name="buzztui-${{ needs.resolve.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/buzztui" "dist/$name/"
           cp README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          # Checksums are produced next to the artefact so the installer can
-          # verify a download without trusting the transport alone.
+          # Checksums sit next to the artefact so the installer can verify a
+          # download without trusting the transport alone.
           ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
-          echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -90,11 +133,9 @@ jobs:
 
   publish:
     name: publish release
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -105,14 +146,13 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
-          cat *.sha256 | sort -k2 > SHA256SUMS
-          rm -f *.sha256
-          ls -la
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          rm -f ./*.sha256
+          cat SHA256SUMS
 
-      - name: publish
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || inputs.tag }}
+          tag_name: ${{ needs.resolve.outputs.tag }}
           draft: false
           generate_release_notes: true
           files: |
