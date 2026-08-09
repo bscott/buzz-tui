@@ -18,15 +18,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Paragraph};
 
 use crate::app::{App, ComposeMode, Focus};
-use crate::keys::{Action, Chord, Scope};
+use crate::keys::{Action, Chord};
 use crate::model::ChannelKind;
 use crate::net::ConnState;
+use crate::update::Status as UpdateStatus;
 
 /// Below this width the sidebar and member list are folded away, because two
 /// columns of chrome leave no room for the conversation itself.
 const NARROW: u16 = 64;
 /// The composer never grows past this, however long the draft gets.
 const COMPOSER_MAX_ROWS: u16 = 8;
+/// With less room than this, an open thread replaces the timeline instead of
+/// crushing both panes into unreadable columns.
+const THREAD_SPLIT_MIN: u16 = 88;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
@@ -42,13 +46,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let show_sidebar = app.show_sidebar && !narrow;
     let show_members = app.show_members && !narrow && screen.width >= 96;
 
-    // The hint bar only claims a row when it has something to say, which is
-    // what keeps the conversation as tall as the terminal allows.
+    // A stable one-row status line keeps version and update state anchored in
+    // the bottom-right corner; contextual key hints share its left side.
     let hint = hint_bar(app);
-    let hint_rows = u16::from(hint.is_some());
-
-    let [body, hint_area] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(hint_rows)]).areas(screen);
+    let [body, status_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(screen);
 
     let sidebar_width = app.config.ui.sidebar_width.clamp(18, 36);
     let member_width = 24;
@@ -76,15 +78,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     .areas(centre);
 
     render_header(frame, header, app, narrow);
-    timeline::render(frame, conversation, app);
+    render_conversation(frame, conversation, app);
     render_composer(frame, compose, app);
-
-    if let Some(line) = hint {
-        frame.render_widget(
-            Paragraph::new(line).style(Style::new().bg(app.palette.panel_bg)),
-            hint_area,
-        );
-    }
+    render_status(frame, status_area, app, hint);
 
     // Diagnostics sit above toasts so a broken config is never hidden by a
     // transient notification.
@@ -115,6 +111,98 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             frame.set_cursor_position((x, y));
         }
     }
+}
+fn render_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
+    if app.thread_root.is_none() {
+        app.viewport.thread_rows = 0;
+        app.viewport.thread_content = 0;
+        timeline::render(frame, area, app);
+        return;
+    }
+
+    if area.width < THREAD_SPLIT_MIN {
+        let [header, thread] =
+            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+        render_thread_header(frame, header, app);
+        timeline::render_thread(frame, thread, app);
+        return;
+    }
+
+    let thread_width = (area.width * 2 / 5).clamp(34, 58);
+    let [timeline, divider, thread] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(thread_width),
+    ])
+    .areas(area);
+    timeline::render(frame, timeline, app);
+    widgets::separator(frame, divider, &app.palette, app.focus == Focus::Thread);
+    let [header, messages] =
+        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(thread);
+    render_thread_header(frame, header, app);
+    timeline::render_thread(frame, messages, app);
+}
+
+fn render_thread_header(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(root) = app.thread_root.as_deref() else {
+        return;
+    };
+    let replies = app.thread_reply_count(root);
+    let author = app
+        .message(root)
+        .map(|message| app.display_name(&message.author))
+        .unwrap_or_else(|| "unknown".to_string());
+    let label = if replies == 1 {
+        "1 reply".to_string()
+    } else {
+        format!("{replies} replies")
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" thread ", app.palette.accent_strong()),
+            Span::styled(
+                text::truncate_end(&author, 22).into_owned(),
+                app.palette.strong(),
+            ),
+            Span::styled(format!("  {label}"), app.palette.pending()),
+        ])),
+        area,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            Line::from(Span::styled(
+                format!("{} close ", app.keymap.hint(Action::Cancel)),
+                app.palette.dim(),
+            ))
+            .right_aligned(),
+        ),
+        area,
+    );
+}
+
+fn render_status(frame: &mut Frame, area: Rect, app: &App, hint: Option<Line<'static>>) {
+    let palette = &app.palette;
+    frame.render_widget(
+        Paragraph::new(hint.unwrap_or_default()).style(Style::new().bg(palette.panel_bg)),
+        area,
+    );
+
+    let current = env!("CARGO_PKG_VERSION");
+    let (label, style) = match &app.update {
+        UpdateStatus::Checking => (format!("v{current}  checking updates "), palette.dim()),
+        UpdateStatus::Current | UpdateStatus::Unavailable => {
+            (format!("v{current} "), palette.pending())
+        }
+        UpdateStatus::Available(latest) => (
+            format!("update v{latest} available \u{2191} "),
+            palette.warn(),
+        ),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(label, style)).right_aligned())
+            .style(Style::new().bg(palette.panel_bg)),
+        area,
+    );
 }
 
 fn composer_height(app: &App, width: u16) -> u16 {
@@ -359,9 +447,9 @@ fn render_members(frame: &mut Frame, area: Rect, app: &App) {
 
 // ----------------------------------------------------------------- hint bar
 
-/// The transient mode bar. It appears while a key sequence is in flight, or
-/// while the keyboard is on the conversation rather than in the composer, and
-/// every string in it comes from the live keymap.
+/// The mode bar is always present when no overlay covers the application. Its
+/// actions follow keyboard focus, so it never advertises `r` while `r` would be
+/// inserted into the composer as text.
 fn hint_bar(app: &App) -> Option<Line<'static>> {
     let palette = &app.palette;
 
@@ -400,18 +488,13 @@ fn hint_bar(app: &App) -> Option<Line<'static>> {
         return Some(Line::from(spans));
     }
 
-    if app.focus.scope() != Scope::Normal || app.overlay.is_some() {
+    if app.overlay.is_some() {
         return None;
     }
 
-    let mut spans = vec![widgets::chip("NAVIGATE", palette.chip()), Span::raw(" ")];
-    for action in [
-        Action::FocusComposer,
-        Action::Reply,
-        Action::React,
-        Action::OpenSwitcher,
-        Action::OpenHelp,
-    ] {
+    let (label, actions) = context_hints(app.focus);
+    let mut spans = vec![widgets::chip(label, palette.chip()), Span::raw(" ")];
+    for &action in actions {
         let key = app.keymap.hint(action);
         if key == "unset" {
             continue;
@@ -422,9 +505,55 @@ fn hint_bar(app: &App) -> Option<Line<'static>> {
     Some(Line::from(spans))
 }
 
+fn context_hints(focus: Focus) -> (&'static str, &'static [Action]) {
+    match focus {
+        Focus::Composer => (
+            "COMPOSE",
+            &[
+                Action::Send,
+                Action::Newline,
+                Action::FocusTimeline,
+                Action::OpenSwitcher,
+                Action::OpenHelp,
+            ],
+        ),
+        Focus::Sidebar => (
+            "CHANNELS",
+            &[
+                Action::FocusTimeline,
+                Action::OpenSwitcher,
+                Action::OpenSearch,
+                Action::OpenHelp,
+            ],
+        ),
+        Focus::Timeline => (
+            "NAVIGATE",
+            &[
+                Action::FocusComposer,
+                Action::Reply,
+                Action::React,
+                Action::OpenThread,
+                Action::OpenHelp,
+            ],
+        ),
+        Focus::Thread => (
+            "THREAD",
+            &[
+                Action::FocusComposer,
+                Action::Reply,
+                Action::React,
+                Action::Cancel,
+                Action::OpenHelp,
+            ],
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::failure_summary;
+    use super::{context_hints, failure_summary};
+    use crate::app::Focus;
+    use crate::keys::Action;
 
     /// A rejection the user can act on must survive the trip from the wire to
     /// the status line; these are verbatim reasons from a real Buzz relay.
@@ -455,5 +584,20 @@ mod tests {
     fn a_long_reason_is_bounded_so_it_cannot_push_the_channel_name_off_screen() {
         let summary = failure_summary(&format!("error: {}", "x".repeat(200)));
         assert!(crate::ui::text::width(&summary) <= 40, "{summary}");
+    }
+    #[test]
+    fn shortcut_bar_matches_the_keys_owned_by_each_focus() {
+        let (composer_label, composer) = context_hints(Focus::Composer);
+        assert_eq!(composer_label, "COMPOSE");
+        assert!(composer.contains(&Action::Send));
+        assert!(
+            !composer.contains(&Action::Reply),
+            "`r` types text while the composer owns the keyboard"
+        );
+
+        let (timeline_label, timeline) = context_hints(Focus::Timeline);
+        assert_eq!(timeline_label, "NAVIGATE");
+        assert!(timeline.contains(&Action::Reply));
+        assert!(timeline.contains(&Action::OpenThread));
     }
 }

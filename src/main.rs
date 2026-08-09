@@ -12,6 +12,7 @@ mod overlay;
 mod proto;
 mod store;
 mod ui;
+mod update;
 
 use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
@@ -387,6 +388,7 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
     diagnostics.extend(keymap.diagnostics.iter().cloned());
 
     let (relay, mut relay_updates) = net::spawn(config.relay.clone(), keypair.clone());
+    let mut update_rx = update::spawn();
     let (media_tx, mut media_rx) = mpsc::unbounded_channel::<MediaEvent>();
 
     let mut terminal = ratatui::try_init().context("could not take over the terminal")?;
@@ -404,8 +406,6 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
         media_tx,
     );
 
-    let graphics = (media.protocol_name(), media.high_resolution());
-
     let mut app = App::new(
         config,
         paths,
@@ -417,17 +417,6 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
         diagnostics,
     );
     app.mouse = mouse;
-    // Say once why pictures look coarse, rather than leaving it a mystery.
-    if !graphics.1 && app.show_images {
-        app.toast(
-            app::ToastKind::Info,
-            "images will be coarse",
-            Some(format!(
-                "this terminal reports no kitty, sixel, or iterm2 support, so images use {}",
-                graphics.0
-            )),
-        );
-    }
     if generated {
         app.toast(
             app::ToastKind::Info,
@@ -436,7 +425,14 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
         );
     }
 
-    let result = event_loop(&mut terminal, &mut app, &mut relay_updates, &mut media_rx).await;
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &mut relay_updates,
+        &mut media_rx,
+        &mut update_rx,
+    )
+    .await;
 
     app.shutdown();
     // Give the relay task a moment to flush the offline presence event.
@@ -452,10 +448,12 @@ async fn event_loop(
     app: &mut App,
     relay_updates: &mut mpsc::UnboundedReceiver<net::Update>,
     media_rx: &mut mpsc::UnboundedReceiver<MediaEvent>,
+    update_rx: &mut mpsc::UnboundedReceiver<update::Status>,
 ) -> Result<()> {
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut update_done = false;
 
     while app.running {
         if app.dirty {
@@ -492,6 +490,12 @@ async fn event_loop(
             event = media_rx.recv() => {
                 if let Some(event) = event {
                     app.on_media(event);
+                }
+            }
+            status = update_rx.recv(), if !update_done => {
+                update_done = true;
+                if let Some(status) = status {
+                    app.on_update(status);
                 }
             }
             _ = tick.tick() => app.on_tick(),

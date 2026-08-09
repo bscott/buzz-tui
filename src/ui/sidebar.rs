@@ -1,9 +1,8 @@
 //! The conversation rail.
 //!
-//! Two sections, groups and direct messages, split by a rule. Selection and
-//! "currently open" are different states with different backgrounds, and focus
-//! lives on the separator column rather than on a border, so the rail never
-//! grows chrome just to say where the cursor is.
+//! Pinned conversations, channels, and direct messages form quiet sections with
+//! deliberate breathing room. Selection and "currently open" remain separate
+//! states, and focus lives on the continuous separator rather than another box.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -21,6 +20,7 @@ enum Row<'a> {
     Heading(&'static str, usize),
     Channel(&'a Channel),
     Empty(&'static str),
+    Gap,
 }
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -34,25 +34,40 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         ..area
     };
 
+    let pinned: Vec<&Channel> = app.channels.iter().filter(|c| c.pinned).collect();
     let groups: Vec<&Channel> = app
         .channels
         .iter()
-        .filter(|c| c.kind == ChannelKind::Group)
+        .filter(|c| c.kind == ChannelKind::Group && !c.hidden && !c.pinned)
         .collect();
     let directs: Vec<&Channel> = app
         .channels
         .iter()
-        .filter(|c| c.kind == ChannelKind::Direct)
+        .filter(|c| (c.kind == ChannelKind::Direct || c.hidden) && !c.pinned)
         .collect();
 
-    let mut rows: Vec<Row> = Vec::with_capacity(app.channels.len() + 4);
-    rows.push(Row::Heading("channels", groups.len()));
-    if groups.is_empty() {
-        rows.push(Row::Empty("no channels yet"));
+    let mut rows: Vec<Row> = Vec::with_capacity(app.channels.len() + 7);
+    if !pinned.is_empty() {
+        rows.push(Row::Heading("pinned", pinned.len()));
+        rows.extend(pinned.iter().copied().map(Row::Channel));
+        rows.push(Row::Gap);
     }
-    rows.extend(groups.iter().copied().map(Row::Channel));
+    if !groups.is_empty()
+        || !app
+            .channels
+            .iter()
+            .any(|c| c.kind == ChannelKind::Group && !c.hidden)
+    {
+        rows.push(Row::Heading("channels", groups.len()));
+        if groups.is_empty() {
+            rows.push(Row::Empty("no channels yet"));
+        } else {
+            rows.extend(groups.iter().copied().map(Row::Channel));
+        }
+    }
     if !directs.is_empty() {
-        rows.push(Row::Heading("direct", directs.len()));
+        rows.push(Row::Gap);
+        rows.push(Row::Heading("direct messages", directs.len()));
         rows.extend(directs.iter().copied().map(Row::Channel));
     }
 
@@ -74,14 +89,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let palette = &app.palette;
     let budget = content.width.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::with_capacity(height);
-    // Row indices of section headings, so a rule can be drawn above each one
-    // after the text has been laid out.
-    let mut headings: Vec<(u16, &str)> = Vec::new();
 
     for row in rows.iter().skip(offset).take(height) {
         match row {
             Row::Heading(label, count) => {
-                headings.push((lines.len() as u16, *label));
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!(" {label}"),
@@ -101,24 +112,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             Row::Channel(channel) => {
                 lines.push(channel_line(app, channel, budget));
             }
+            Row::Gap => lines.push(Line::from("")),
         }
     }
 
     frame.render_widget(Paragraph::new(lines), content);
-    for (row, label) in headings {
-        if row == 0 || label != "direct" {
-            continue;
-        }
-        widgets::rule(
-            frame,
-            Rect {
-                y: content.y + row - 1,
-                height: 1,
-                ..content
-            },
-            palette,
-        );
-    }
     widgets::separator(frame, area, palette, focused);
     if rows.len() > height {
         widgets::scrollbar(

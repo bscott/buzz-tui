@@ -708,26 +708,72 @@ impl Store {
     pub fn channels(&self) -> Result<Vec<Channel>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT c.id, c.name, c.about, c.kind, c.private, c.joined, c.muted,
-                    c.pinned, c.peer,
-                    COALESCE(MAX(e.created_at), 0) AS last_activity,
-                    COALESCE(SUM(CASE WHEN e.created_at > c.last_read_at
-                                       AND e.pubkey <> ?1 AND e.deleted = 0
-                                      THEN 1 ELSE 0 END), 0) AS unread,
-                    COALESCE(SUM(CASE WHEN e.created_at > c.last_read_at
-                                       AND e.pubkey <> ?1 AND e.deleted = 0
-                                       AND e.mentions_me = 1
-                                      THEN 1 ELSE 0 END), 0) AS mentions
-             FROM channels c
-             LEFT JOIN events e
-                    ON e.channel = c.id AND e.kind IN (9, 40002)
-             GROUP BY c.id
-             ORDER BY c.pinned DESC, last_activity DESC, c.name COLLATE NOCASE",
+            "WITH activity AS (
+                 SELECT c.id,
+                        CASE WHEN c.hidden = 1 THEN COALESCE((
+                            SELECT NULLIF(p.name, '')
+                            FROM members dm
+                            LEFT JOIN profiles p ON p.pubkey = dm.pubkey
+                            WHERE dm.channel = c.id AND dm.pubkey <> ?1
+                            ORDER BY dm.pubkey
+                            LIMIT 1
+                        ), c.name) ELSE c.name END AS name,
+                        c.about, c.kind, c.private, c.joined, c.muted, c.pinned,
+                        COALESCE(c.peer, CASE WHEN c.hidden = 1 THEN (
+                            SELECT dm.pubkey
+                            FROM members dm
+                            WHERE dm.channel = c.id AND dm.pubkey <> ?1
+                            ORDER BY dm.pubkey
+                            LIMIT 1
+                        ) END) AS peer,
+                        c.hidden, c.updated_at,
+                        COALESCE(MAX(e.created_at), 0) AS last_activity,
+                        COALESCE(SUM(CASE WHEN e.created_at > c.last_read_at
+                                           AND e.pubkey <> ?1 AND e.deleted = 0
+                                          THEN 1 ELSE 0 END), 0) AS unread,
+                        COALESCE(SUM(CASE WHEN e.created_at > c.last_read_at
+                                           AND e.pubkey <> ?1 AND e.deleted = 0
+                                           AND e.mentions_me = 1
+                                          THEN 1 ELSE 0 END), 0) AS mentions
+                 FROM channels c
+                 LEFT JOIN events e
+                        ON e.channel = c.id AND e.kind IN (9, 40002)
+                 GROUP BY c.id
+             ),
+             ranked AS (
+                 SELECT *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY
+                                CASE WHEN last_activity = 0
+                                     THEN lower(trim(name)) ELSE id END,
+                                CASE WHEN last_activity = 0
+                                     THEN COALESCE(about, '') ELSE id END,
+                                CASE WHEN last_activity = 0
+                                     THEN kind ELSE id END,
+                                CASE WHEN last_activity = 0
+                                     THEN CAST(private AS TEXT) ELSE id END,
+                                CASE WHEN last_activity = 0
+                                     THEN COALESCE(peer, '') ELSE id END
+                            ORDER BY pinned DESC, updated_at DESC, id
+                        ) AS duplicate_rank
+                 FROM activity
+             )
+             SELECT id, name, about, kind, private, joined, muted, pinned, peer,
+                    last_activity, unread, mentions, hidden
+             FROM ranked
+             WHERE duplicate_rank = 1
+             ORDER BY pinned DESC, last_activity DESC, name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map(params![self.me], |row| {
+            let peer: Option<String> = row.get(8)?;
+            let hidden = row.get::<_, i64>(12)? != 0;
+            let mut name: String = row.get(1)?;
+            if hidden && name.eq_ignore_ascii_case("dm") {
+                name = peer.as_deref().map(proto::short_pubkey).unwrap_or(name);
+            }
             Ok(Channel {
                 id: row.get(0)?,
-                name: row.get(1)?,
+                name,
                 about: row.get(2)?,
                 kind: if row.get::<_, String>(3)? == "direct" {
                     ChannelKind::Direct
@@ -735,10 +781,10 @@ impl Store {
                     ChannelKind::Group
                 },
                 private: row.get::<_, i64>(4)? != 0,
+                hidden,
                 joined: row.get::<_, i64>(5)? != 0,
                 muted: row.get::<_, i64>(6)? != 0,
                 pinned: row.get::<_, i64>(7)? != 0,
-                peer: row.get(8)?,
                 last_activity: row.get(9)?,
                 unread: row.get::<_, i64>(10)? as u32,
                 mentions: row.get::<_, i64>(11)? as u32,
@@ -1094,6 +1140,22 @@ mod tests {
         chat_at(keys, channel, body, 1_700_000_000)
     }
 
+    fn channel_meta(keys: &Keys, id: &str, name: &str, hidden: bool, at: u64) -> Event {
+        let mut tags = vec![
+            Tag::parse(["d", id]).unwrap(),
+            Tag::parse(["name", name]).unwrap(),
+            Tag::parse(["about", "same room"]).unwrap(),
+        ];
+        if hidden {
+            tags.push(Tag::parse(["hidden"]).unwrap());
+        }
+        EventBuilder::new(Kind::from_u16(kinds::GROUP_METADATA), "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from_secs(at))
+            .finalize(keys)
+            .unwrap()
+    }
+
     fn store_with(keys: &Keys) -> Store {
         Store::in_memory(&keys.public_key().to_hex()).unwrap()
     }
@@ -1326,6 +1388,74 @@ mod tests {
         let channel = &store.channels().unwrap()[0];
         assert_eq!(channel.unread, 2);
         assert_eq!(channel.mentions, 1);
+    }
+
+    #[test]
+    fn legacy_directs_are_named_while_stale_empty_group_duplicates_collapse() {
+        let keys = Keys::generate();
+        let store = store_with(&keys);
+        let peer = "f".repeat(64);
+        store
+            .ingest(&channel_meta(&keys, "hidden", "DM", true, 100))
+            .unwrap();
+        {
+            let conn = store.lock();
+            conn.execute(
+                "INSERT INTO members (channel, pubkey) VALUES ('hidden', ?1), ('hidden', ?2)",
+                params![keys.public_key().to_hex(), peer],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO profiles (pubkey, name) VALUES (?1, 'Fizz')",
+                params![peer],
+            )
+            .unwrap();
+        }
+        store
+            .ingest(&channel_meta(&keys, "welcome-old", "Welcome", false, 100))
+            .unwrap();
+        store
+            .ingest(&channel_meta(
+                &keys,
+                "welcome-current",
+                "Welcome",
+                false,
+                200,
+            ))
+            .unwrap();
+
+        let channels = store.channels().unwrap();
+        assert_eq!(channels.len(), 2);
+        let direct = channels
+            .iter()
+            .find(|channel| channel.id == "hidden")
+            .unwrap();
+        assert!(direct.hidden);
+        assert_eq!(direct.kind, ChannelKind::Group);
+        assert_eq!(direct.name, "Fizz");
+        assert!(
+            channels
+                .iter()
+                .any(|channel| channel.id == "welcome-current")
+        );
+        assert!(channels.iter().all(|channel| channel.id != "welcome-old"));
+    }
+
+    #[test]
+    fn active_channels_with_the_same_name_are_not_collapsed() {
+        let keys = Keys::generate();
+        let store = store_with(&keys);
+        for id in ["one", "two"] {
+            store
+                .ingest(&channel_meta(&keys, id, "Shared name", false, 100))
+                .unwrap();
+            store.ingest(&chat(&keys, id, id)).unwrap();
+        }
+
+        let channels = store.channels().unwrap();
+        assert_eq!(channels.len(), 2);
+        assert!(channels.iter().any(|channel| channel.id == "one"));
+        assert!(channels.iter().any(|channel| channel.id == "two"));
     }
 
     #[test]

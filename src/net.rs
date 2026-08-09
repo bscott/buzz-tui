@@ -10,7 +10,7 @@
 //! client that loses a message because a socket blinked is a broken chat client.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -187,6 +187,12 @@ impl Connection {
             backoff: BACKOFF_MIN,
         }
     }
+    /// Removes a live or staged subscription exactly once. The boolean gates
+    /// wire-level CLOSE frames so duplicate unsubscribes cannot create an
+    /// unmatched CLOSED acknowledgement.
+    fn remove_subscription(&mut self, id: &str) -> bool {
+        self.subscriptions.remove(id).is_some()
+    }
 
     async fn run(mut self) {
         loop {
@@ -252,7 +258,7 @@ impl Connection {
                 self.subscriptions.insert(id, (filters, oneshot));
             }
             Command::Unsubscribe(id) => {
-                self.subscriptions.remove(&id);
+                self.remove_subscription(&id);
             }
             Command::Switch(_) | Command::Shutdown => {}
         }
@@ -281,6 +287,9 @@ impl Connection {
         // waiting for it rather than by sending anything.
         let mut authenticated = false;
         let mut auth_event: Option<EventId> = None;
+        // Buzz acknowledges client-initiated CLOSE frames with CLOSED. Those
+        // acknowledgements are lifecycle bookkeeping, not failures for the UI.
+        let mut expected_closes: HashSet<String> = HashSet::new();
 
         loop {
             tokio::select! {
@@ -368,6 +377,7 @@ impl Connection {
                             let id = subscription_id.to_string();
                             if self.subscriptions.get(&id).is_some_and(|(_, one)| *one) {
                                 self.subscriptions.remove(&id);
+                                expected_closes.insert(id.clone());
                                 let frame = ClientMessage::close(SubscriptionId::new(id.clone()));
                                 if sink.send(WsMessage::text(frame.as_json())).await.is_err() {
                                     return Exit::Retry("write: close failed".into());
@@ -377,6 +387,10 @@ impl Connection {
                         }
                         RelayMessage::Closed { subscription_id, message } => {
                             let id = subscription_id.to_string();
+                            if expected_closes.remove(&id) {
+                                debug!(subscription = %id, "relay acknowledged subscription close");
+                                continue;
+                            }
                             self.subscriptions.remove(&id);
                             self.emit(Update::Closed {
                                 subscription: id,
@@ -394,47 +408,79 @@ impl Connection {
 
                 command = self.commands.recv() => {
                     let Some(command) = command else { return Exit::Shutdown };
-                    match command {
-                        Command::Shutdown => {
-                            let _ = sink.send(WsMessage::Close(None)).await;
-                            return Exit::Shutdown;
-                        }
-                        Command::Switch(url) => {
-                            let _ = sink.send(WsMessage::Close(None)).await;
-                            return Exit::Switch(url);
-                        }
-                        Command::Publish(event) => {
-                            // Queue unconditionally, then try to drain. The event
-                            // is only dropped from the queue once the socket has
-                            // taken it, so a blink costs a retry, not a message.
-                            self.outbox.push_back(*event);
-                            if authenticated
-                                && let Err(reason) = self.flush(&mut sink).await {
-                                    return Exit::Retry(reason);
-                                }
-                        }
-                        Command::Subscribe { id, filters, oneshot } => {
-                            self.subscriptions.insert(id.clone(), (filters.clone(), oneshot));
-                            if !authenticated {
-                                continue;
-                            }
-                            let frame = ClientMessage::req(SubscriptionId::new(id), filters);
-                            if sink.send(WsMessage::text(frame.as_json())).await.is_err() {
-                                return Exit::Retry("write: subscribe failed".into());
-                            }
-                        }
-                        Command::Unsubscribe(id) => {
-                            self.subscriptions.remove(&id);
-                            if !authenticated {
-                                continue;
-                            }
-                            let frame = ClientMessage::close(SubscriptionId::new(id));
-                            if sink.send(WsMessage::text(frame.as_json())).await.is_err() {
-                                return Exit::Retry("write: unsubscribe failed".into());
-                            }
-                        }
+                    if let Some(exit) = self
+                        .handle_command(
+                            command,
+                            authenticated,
+                            &mut expected_closes,
+                            &mut sink,
+                        )
+                        .await
+                    {
+                        return exit;
                     }
                 }
+            }
+        }
+    }
+
+    /// Applies one command to an authenticated or still-handshaking socket.
+    /// Returning an exit asks the session loop to reconnect or stop.
+    async fn handle_command<S>(
+        &mut self,
+        command: Command,
+        authenticated: bool,
+        expected_closes: &mut HashSet<String>,
+        sink: &mut S,
+    ) -> Option<Exit>
+    where
+        S: SinkExt<WsMessage> + Unpin,
+    {
+        match command {
+            Command::Shutdown => {
+                let _ = sink.send(WsMessage::Close(None)).await;
+                Some(Exit::Shutdown)
+            }
+            Command::Switch(url) => {
+                let _ = sink.send(WsMessage::Close(None)).await;
+                Some(Exit::Switch(url))
+            }
+            Command::Publish(event) => {
+                // Queue unconditionally, then try to drain. The event is only
+                // dropped once the socket accepts it, so a blink costs a retry.
+                self.outbox.push_back(*event);
+                if authenticated && let Err(reason) = self.flush(sink).await {
+                    return Some(Exit::Retry(reason));
+                }
+                None
+            }
+            Command::Subscribe {
+                id,
+                filters,
+                oneshot,
+            } => {
+                self.subscriptions
+                    .insert(id.clone(), (filters.clone(), oneshot));
+                if !authenticated {
+                    return None;
+                }
+                let frame = ClientMessage::req(SubscriptionId::new(id), filters);
+                sink.send(WsMessage::text(frame.as_json()))
+                    .await
+                    .err()
+                    .map(|_| Exit::Retry("write: subscribe failed".into()))
+            }
+            Command::Unsubscribe(id) => {
+                let was_subscribed = self.remove_subscription(&id);
+                if !authenticated || !was_subscribed {
+                    return None;
+                }
+                expected_closes.insert(id.clone());
+                let frame = ClientMessage::close(SubscriptionId::new(id));
+                sink.send(WsMessage::text(frame.as_json()))
+                    .await
+                    .err()
+                    .map(|_| Exit::Retry("write: unsubscribe failed".into()))
             }
         }
     }
@@ -627,6 +673,35 @@ mod tests {
 
         conn.stage(Command::Unsubscribe("main".into()));
         assert!(conn.subscriptions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_unsubscribe_commands_write_one_close_frame() {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let (utx, _urx) = mpsc::unbounded_channel();
+        let mut conn = Connection::new("ws://localhost:3000".into(), Keys::generate(), rx, utx);
+        conn.subscriptions
+            .insert("main".into(), (Vec::new(), false));
+        let mut expected_closes = HashSet::new();
+        let mut sink = FlakySink {
+            remaining: 8,
+            written: Vec::new(),
+        };
+
+        for _ in 0..2 {
+            let exit = conn
+                .handle_command(
+                    Command::Unsubscribe("main".into()),
+                    true,
+                    &mut expected_closes,
+                    &mut sink,
+                )
+                .await;
+            assert!(exit.is_none());
+        }
+
+        assert_eq!(sink.written, [r#"["CLOSE","main"]"#]);
+        assert_eq!(expected_closes, HashSet::from(["main".to_string()]));
     }
 
     /// The wire format is the contract with the relay, so pin it down.

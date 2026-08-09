@@ -21,6 +21,9 @@ pub struct Channel {
     pub about: Option<String>,
     pub kind: ChannelKind,
     pub private: bool,
+    /// NIP-29 legacy direct-message room. It stays a group on the wire but is
+    /// presented with the counterparty in the direct-message section.
+    pub hidden: bool,
     /// True once we hold a membership record for ourselves.
     pub joined: bool,
     pub muted: bool,
@@ -31,18 +34,18 @@ pub struct Channel {
     pub unread: u32,
     /// Unread messages that name us directly.
     pub mentions: u32,
-    /// Counterparty pubkey for direct messages.
-    pub peer: Option<String>,
 }
 
 impl Channel {
     /// The sigil that precedes a conversation name, distinguishing groups,
     /// private groups, and direct messages at a glance.
     pub fn sigil(&self) -> &'static str {
-        match (self.kind, self.private) {
-            (ChannelKind::Direct, _) => "@",
-            (ChannelKind::Group, true) => "\u{1f512}",
-            (ChannelKind::Group, false) => "#",
+        if self.hidden || self.kind == ChannelKind::Direct {
+            "@"
+        } else if self.private {
+            "\u{1f512}"
+        } else {
+            "#"
         }
     }
 }
@@ -83,6 +86,13 @@ pub struct Message {
 impl Message {
     pub fn is_pending(&self) -> bool {
         matches!(self.delivery, Some(Delivery::Sending | Delivery::Failed))
+    }
+
+    /// True for the root itself and every NIP-10 descendant that names it.
+    /// Direct-parent tags alone are not enough for nested replies; ingestion
+    /// resolves those into `root`.
+    pub fn belongs_to_thread(&self, root: &str) -> bool {
+        self.id == root || self.root.as_deref() == Some(root)
     }
 }
 
@@ -144,5 +154,40 @@ impl Presence {
             Presence::Away => "\u{25d0}",
             Presence::Offline => "\u{25cb}",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(id: &str, parent: Option<&str>, root: Option<&str>) -> Message {
+        Message {
+            id: id.to_string(),
+            channel: "channel".to_string(),
+            author: "author".to_string(),
+            created_at: 0,
+            body: String::new(),
+            edited: false,
+            deleted: false,
+            parent: parent.map(str::to_string),
+            root: root.map(str::to_string),
+            reactions: Vec::new(),
+            delivery: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn thread_membership_includes_root_and_nested_descendants_only() {
+        let root = message("root", None, None);
+        let direct = message("direct", Some("root"), Some("root"));
+        let nested = message("nested", Some("direct"), Some("root"));
+        let unrelated = message("other", None, None);
+
+        assert!(root.belongs_to_thread("root"));
+        assert!(direct.belongs_to_thread("root"));
+        assert!(nested.belongs_to_thread("root"));
+        assert!(!unrelated.belongs_to_thread("root"));
     }
 }

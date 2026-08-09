@@ -43,8 +43,14 @@
         >
       </div>
       <p class="note">
-        Latest release is <strong>{{VERSION}}</strong>. Verifies the download
-        against published checksums and installs to <code>~/.local/bin</code>.
+        Latest release is
+        <a
+          id="latest-release"
+          href="https://github.com/{{REPO}}/releases/latest"
+          aria-live="polite"
+          ><strong>{{VERSION}}</strong></a
+        >. Verifies the download against published checksums and installs to
+        <code>~/.local/bin</code>.
         Linux and macOS, x86_64 and arm64. Or build it yourself with
         <code>cargo install --path .</code>.
       </p>
@@ -120,5 +126,26 @@ identity
         <span>MIT</span>
       </footer>
     </main>
+    <script>
+      // Cargo.toml supplies a useful no-script fallback; the release endpoint is
+      // authoritative once the page loads, including releases made after the
+      // last Pages deployment.
+      fetch("https://api.github.com/repos/{{REPO}}/releases/latest", {
+        headers: { Accept: "application/vnd.github+json" },
+      })
+        .then((response) => {
+          if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
+          return response.json();
+        })
+        .then((release) => {
+          if (typeof release.tag_name !== "string" || !release.tag_name) return;
+          const target = document.getElementById("latest-release");
+          target.querySelector("strong").textContent = release.tag_name;
+          if (typeof release.html_url === "string") target.href = release.html_url;
+        })
+        .catch(() => {
+          // The generated fallback stays readable offline or under rate limit.
+        });
+    </script>
   </body>
 </html>

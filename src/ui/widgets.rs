@@ -91,18 +91,6 @@ pub fn separator(frame: &mut Frame, area: Rect, palette: &Palette, focused: bool
     }
 }
 
-/// Draws a full-width horizontal rule, used between sidebar sections.
-pub fn rule(frame: &mut Frame, area: Rect, palette: &Palette) {
-    if area.height == 0 {
-        return;
-    }
-    let line = "\u{2500}".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::new().fg(palette.surface_dim)),
-        Rect { height: 1, ..area },
-    );
-}
-
 /// Dims every cell already drawn, so an overlay reads as being in front of the
 /// interface rather than pasted onto it. Cheaper and steadier than painting a
 /// translucent shade, and it survives any theme.

@@ -123,13 +123,57 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+    render_rows(frame, area, content, app, rows, app.scroll, focused);
+}
+
+/// Draws the conversation subset belonging to the open thread.
+pub fn render_thread(frame: &mut Frame, area: Rect, app: &mut App) {
+    if area.width < 8 || area.height == 0 {
+        return;
+    }
+    let focused = app.focus == Focus::Thread;
+    let content = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let Some(root) = app.thread_root.clone() else {
+        return;
+    };
+    let rows = layout_thread(app, &root, content.width as usize);
+    app.viewport.thread_rows = content.height;
+    app.viewport.thread_content = rows.len() as u16;
+
+    if rows.is_empty() {
+        widgets::empty_state(
+            frame,
+            content,
+            &app.palette,
+            "thread unavailable",
+            "the root message is not in the loaded history",
+            &[],
+        );
+        return;
+    }
+    render_rows(frame, area, content, app, rows, app.thread_scroll, focused);
+}
+
+fn render_rows(
+    frame: &mut Frame,
+    area: Rect,
+    content: Rect,
+    app: &mut App,
+    rows: Vec<Row>,
+    offset: u16,
+    focused: bool,
+) {
     // The offset counts rows scrolled up from the newest message, which keeps a
     // live conversation pinned to the bottom as it grows. A conversation
     // shorter than the pane is padded at the top for the same reason: chat
     // grows upward from the composer, it does not hang from the header.
+    let total = rows.len() as u16;
     let height = content.height;
     let max_offset = total.saturating_sub(height);
-    let offset = app.scroll.min(max_offset);
+    let offset = offset.min(max_offset);
     let start = max_offset.saturating_sub(offset) as usize;
     let pad = height.saturating_sub(total);
 
@@ -294,6 +338,69 @@ fn layout(app: &App, width: usize) -> Vec<Row> {
         previous = Some(message);
     }
 
+    rows
+}
+/// Lays out the root and descendants without the channel's unread marker. A
+/// direct reply needs no repeated quote because the pane already establishes
+/// its root; nested replies retain one so their branch remains visible.
+fn layout_thread(app: &App, root: &str, width: usize) -> Vec<Row> {
+    let body_width = width.saturating_sub(2);
+    let mut messages: Vec<(Option<usize>, &Message)> = Vec::new();
+    if let Some(message) = app.message(root) {
+        let index = app.timeline.iter().position(|item| item.id == message.id);
+        messages.push((index, message));
+    }
+    messages.extend(
+        app.timeline
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.id != root && message.belongs_to_thread(root))
+            .map(|(index, message)| (Some(index), message)),
+    );
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut previous: Option<&Message> = None;
+    for (index, message) in messages {
+        let selected = index.is_some_and(|index| app.thread_selected == Some(index));
+        let when = Local.timestamp_opt(message.created_at, 0).single();
+        let grouped = previous.is_some_and(|prev| {
+            prev.author == message.author
+                && message.created_at - prev.created_at < GROUP_WINDOW
+                && message.parent.is_none()
+        });
+
+        if !grouped && !rows.is_empty() && !app.compact {
+            rows.push(Row::Text(Line::from("")));
+        }
+        if message.id != root
+            && let Some(parent) = message.parent.as_deref()
+            && parent != root
+        {
+            rows.push(Row::Text(reply_line(app, parent, body_width, selected)));
+        }
+        if !grouped {
+            rows.push(Row::Text(author_line(app, message, when, selected)));
+        }
+        rows.extend(body_rows(app, message, body_width, selected));
+        if !message.reactions.is_empty() {
+            rows.push(Row::Text(reaction_line(app, message, selected)));
+        }
+        if app.show_images {
+            for url in text::image_links(&message.body) {
+                let max = app.config.media.max_rows;
+                let reserved = app.media.rows_for(url, body_width as u16, max);
+                let reserved = if reserved == 0 { 3 } else { reserved };
+                rows.push(Row::ImageTop {
+                    url: url.to_string(),
+                    rows: reserved,
+                });
+                for _ in 1..reserved {
+                    rows.push(Row::ImageBody);
+                }
+            }
+        }
+        previous = Some(message);
+    }
     rows
 }
 

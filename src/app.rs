@@ -34,6 +34,7 @@ use crate::overlay::{
 use crate::proto::{self, kinds};
 use crate::store::{self, Ingested, Store};
 use crate::ui::theme::Palette;
+use crate::update::Status as UpdateStatus;
 
 /// Subscription ids. Fixed strings keep reconnect replay simple.
 const SUB_DISCOVERY: &str = "discovery";
@@ -56,6 +57,7 @@ const TYPING_INTERVAL: Duration = Duration::from_secs(3);
 pub enum Focus {
     Sidebar,
     Timeline,
+    Thread,
     Composer,
 }
 
@@ -65,7 +67,7 @@ impl Focus {
     pub fn scope(self) -> Scope {
         match self {
             Focus::Composer => Scope::Insert,
-            Focus::Sidebar | Focus::Timeline => Scope::Normal,
+            Focus::Sidebar | Focus::Timeline | Focus::Thread => Scope::Normal,
         }
     }
 }
@@ -95,6 +97,8 @@ pub struct Viewport {
     pub timeline_rows: u16,
     pub timeline_content: u16,
     pub sidebar_rows: u16,
+    pub thread_rows: u16,
+    pub thread_content: u16,
 }
 
 /// What the composer is currently doing with its contents.
@@ -131,6 +135,13 @@ pub struct App {
     pub scroll: u16,
     pub follow: bool,
     pub viewport: Viewport,
+    /// Root of the thread shown in the secondary conversation pane.
+    pub thread_root: Option<String>,
+    /// Selected row and scroll state are independent from the main timeline so
+    /// opening a thread never moves the reader's place in the channel.
+    pub thread_selected: Option<usize>,
+    pub thread_scroll: u16,
+    pub thread_follow: bool,
 
     pub profiles: HashMap<String, Profile>,
     /// Parents of loaded replies that are themselves outside the loaded page,
@@ -154,6 +165,7 @@ pub struct App {
     /// Configuration problems, shown as an in-band banner instead of a crash.
     pub diagnostics: Vec<String>,
     pub conn: ConnState,
+    pub update: UpdateStatus,
 
     pub show_sidebar: bool,
     pub show_members: bool,
@@ -208,6 +220,10 @@ impl App {
             scroll: 0,
             follow: true,
             viewport: Viewport::default(),
+            thread_root: None,
+            thread_selected: None,
+            thread_scroll: 0,
+            thread_follow: true,
             profiles: HashMap::new(),
             parents: HashMap::new(),
             members: Vec::new(),
@@ -222,6 +238,7 @@ impl App {
             toasts: Vec::new(),
             diagnostics,
             conn: ConnState::Offline,
+            update: UpdateStatus::Checking,
             show_sidebar: true,
             show_members: false,
             show_images,
@@ -439,6 +456,24 @@ impl App {
             .find(|m| m.id == id)
             .or_else(|| self.parents.get(id))
     }
+    /// Messages belonging to one thread, in channel chronology. The root is
+    /// included first when it is loaded; every descendant names the same NIP-10
+    /// root even when its direct parent is another reply.
+    pub fn thread_messages<'a>(
+        &'a self,
+        root: &'a str,
+    ) -> impl DoubleEndedIterator<Item = (usize, &'a Message)> + 'a {
+        self.timeline
+            .iter()
+            .enumerate()
+            .filter(move |(_, message)| message.belongs_to_thread(root))
+    }
+
+    pub fn thread_reply_count(&self, root: &str) -> usize {
+        self.thread_messages(root)
+            .filter(|(_, message)| message.id != root)
+            .count()
+    }
 
     pub fn open_channel(&mut self, id: &str) {
         if self.active.as_deref() == Some(id) {
@@ -449,6 +484,10 @@ impl App {
         self.follow = true;
         self.scroll = 0;
         self.selected = None;
+        self.thread_root = None;
+        self.thread_selected = None;
+        self.thread_scroll = 0;
+        self.thread_follow = true;
         self.typing.clear();
         self.compose_mode = ComposeMode::New;
         if let Some(index) = self.channels.iter().position(|c| c.id == id) {
@@ -475,10 +514,15 @@ impl App {
     fn clamp_selection(&mut self) {
         if self.timeline.is_empty() {
             self.selected = None;
+            self.thread_selected = None;
             return;
         }
+        let last = self.timeline.len() - 1;
         if let Some(index) = self.selected {
-            self.selected = Some(index.min(self.timeline.len() - 1));
+            self.selected = Some(index.min(last));
+        }
+        if let Some(index) = self.thread_selected {
+            self.thread_selected = Some(index.min(last));
         }
     }
 
@@ -488,7 +532,12 @@ impl App {
     }
 
     pub fn selected_message(&self) -> Option<&Message> {
-        self.selected.and_then(|index| self.timeline.get(index))
+        let selected = if self.focus == Focus::Thread {
+            self.thread_selected
+        } else {
+            self.selected
+        };
+        selected.and_then(|index| self.timeline.get(index))
     }
 
     /// The label for an author, preferring their profile name.
@@ -514,6 +563,21 @@ impl App {
             .collect();
         names.sort();
         names
+    }
+
+    /// Records the advisory release check. Only a newer release interrupts the
+    /// conversation; failures remain visible to diagnostics without pretending
+    /// the relay or cache are unhealthy.
+    pub fn on_update(&mut self, status: UpdateStatus) {
+        if let UpdateStatus::Available(latest) = &status {
+            self.toast(
+                ToastKind::Info,
+                format!("buzztui {latest} is available"),
+                Some("https://github.com/bscott/buzz-tui/releases/latest".to_string()),
+            );
+        }
+        self.update = status;
+        self.dirty = true;
     }
 
     // ------------------------------------------------------------ toasting
@@ -625,7 +689,11 @@ impl App {
             }
             Err(err) => debug!(%err, "local search failed"),
         }
-        // The relay knows about messages we have never cached, so ask it too.
+        // The relay's full-text index rejects shorter terms; local FTS still
+        // gets to answer them.
+        if query.trim().chars().count() < 3 {
+            return;
+        }
         let mut filter = Filter::new()
             .kinds(kinds::filter(kinds::TIMELINE))
             .search(query)
@@ -660,20 +728,28 @@ impl App {
             Action::Cancel => self.cancel(),
             Action::Redraw => {}
 
-            Action::FocusComposer => self.focus = Focus::Composer,
+            Action::FocusComposer => self.focus_composer(),
             Action::FocusTimeline => self.focus = Focus::Timeline,
             Action::FocusSidebar => self.focus = Focus::Sidebar,
             Action::CycleFocus => {
-                self.focus = match self.focus {
-                    Focus::Sidebar => Focus::Timeline,
-                    Focus::Timeline => Focus::Composer,
-                    Focus::Composer => Focus::Sidebar,
+                if self.focus == Focus::Thread {
+                    self.focus_composer();
+                } else {
+                    self.focus = match self.focus {
+                        Focus::Sidebar => Focus::Timeline,
+                        Focus::Timeline if self.thread_root.is_some() => Focus::Thread,
+                        Focus::Timeline => Focus::Composer,
+                        Focus::Composer => Focus::Sidebar,
+                        Focus::Thread => unreachable!(),
+                    };
                 }
             }
             Action::CycleFocusBack => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Composer,
                     Focus::Timeline => Focus::Sidebar,
+                    Focus::Thread => Focus::Timeline,
+                    Focus::Composer if self.thread_root.is_some() => Focus::Thread,
                     Focus::Composer => Focus::Timeline,
                 }
             }
@@ -693,9 +769,35 @@ impl App {
             Action::SelectPrev => self.move_selection(-1),
             Action::ScrollUp => self.scroll_by(3),
             Action::ScrollDown => self.scroll_by(-3),
-            Action::PageUp => self.scroll_by(self.viewport.timeline_rows.max(1) as i32 - 1),
-            Action::PageDown => self.scroll_by(-(self.viewport.timeline_rows.max(1) as i32 - 1)),
+            Action::PageUp => {
+                let rows = if self.focus == Focus::Thread {
+                    self.viewport.thread_rows
+                } else {
+                    self.viewport.timeline_rows
+                };
+                self.scroll_by(rows.max(1) as i32 - 1);
+            }
+            Action::PageDown => {
+                let rows = if self.focus == Focus::Thread {
+                    self.viewport.thread_rows
+                } else {
+                    self.viewport.timeline_rows
+                };
+                self.scroll_by(-(rows.max(1) as i32 - 1));
+            }
+            Action::ScrollTop if self.focus == Focus::Thread => {
+                self.thread_scroll = self
+                    .viewport
+                    .thread_content
+                    .saturating_sub(self.viewport.thread_rows);
+                self.thread_follow = false;
+            }
             Action::ScrollTop => self.load_older(),
+            Action::ScrollBottom if self.focus == Focus::Thread => {
+                self.thread_follow = true;
+                self.thread_scroll = 0;
+                self.thread_selected = None;
+            }
             Action::ScrollBottom => {
                 self.follow = true;
                 self.scroll = 0;
@@ -785,6 +887,23 @@ impl App {
             _ => {}
         }
     }
+    /// Entering the composer from a thread targets the currently highlighted
+    /// reply, while preserving the thread root for NIP-10.
+    fn focus_composer(&mut self) {
+        if self.focus == Focus::Thread
+            && self.compose_mode == ComposeMode::New
+            && let Some(message) = self.selected_message()
+        {
+            self.compose_mode = ComposeMode::Reply {
+                to: message.id.clone(),
+                root: self
+                    .thread_root
+                    .clone()
+                    .unwrap_or_else(|| message.id.clone()),
+            };
+        }
+        self.focus = Focus::Composer;
+    }
 
     /// Quitting is immediate unless it would silently discard something the
     /// user typed, which is the one case worth a keystroke of friction.
@@ -808,6 +927,17 @@ impl App {
         if self.compose_mode != ComposeMode::New {
             self.compose_mode = ComposeMode::New;
             self.composer.clear();
+            if self.thread_root.is_some() {
+                self.focus = Focus::Thread;
+            }
+            return;
+        }
+        if self.focus == Focus::Thread {
+            self.close_thread();
+            return;
+        }
+        if self.focus == Focus::Composer && self.thread_root.is_some() {
+            self.focus = Focus::Thread;
             return;
         }
         if self.selected.take().is_some() {
@@ -853,6 +983,26 @@ impl App {
             self.open_channel(&id);
             return;
         }
+        if self.focus == Focus::Thread {
+            let Some(root) = self.thread_root.as_deref() else {
+                return;
+            };
+            let indices: Vec<usize> = self.thread_messages(root).map(|(index, _)| index).collect();
+            if indices.is_empty() {
+                return;
+            }
+            let last = indices.len() - 1;
+            let position = self
+                .thread_selected
+                .and_then(|selected| indices.iter().position(|index| *index == selected));
+            let position = match position {
+                None => last,
+                Some(position) => (position as isize + delta).clamp(0, last as isize) as usize,
+            };
+            self.thread_selected = Some(indices[position]);
+            self.thread_follow = false;
+            return;
+        }
         if self.timeline.is_empty() {
             return;
         }
@@ -868,6 +1018,16 @@ impl App {
     }
 
     fn scroll_by(&mut self, rows: i32) {
+        if self.focus == Focus::Thread {
+            let max = self
+                .viewport
+                .thread_content
+                .saturating_sub(self.viewport.thread_rows);
+            let next = (self.thread_scroll as i32 + rows).clamp(0, max as i32) as u16;
+            self.thread_scroll = next;
+            self.thread_follow = next == 0;
+            return;
+        }
         let max = self
             .viewport
             .timeline_content
@@ -964,13 +1124,18 @@ impl App {
                 _ => None,
             };
             match self.send_direct(&peer, &channel, &body, reply) {
-                Ok(()) => {
+                Ok(sent_id) => {
                     self.composer.take();
                     self.follow = true;
                     self.scroll = 0;
                     self.reload_timeline();
+                    self.compose_mode =
+                        compose_mode_after_send(&mode, self.thread_root.as_deref(), sent_id);
                 }
-                Err(err) => self.error("could not send", err.to_string()),
+                Err(err) => {
+                    self.compose_mode = mode;
+                    self.error("could not send", err.to_string());
+                }
             }
             return;
         }
@@ -983,6 +1148,7 @@ impl App {
 
         match built {
             Ok(event) => {
+                let sent_id = event.id.to_hex();
                 self.composer.take();
                 // An edit is not a new message, so it must not appear as one.
                 if !matches!(mode, ComposeMode::Edit { .. })
@@ -994,6 +1160,8 @@ impl App {
                 self.follow = true;
                 self.scroll = 0;
                 self.reload_timeline();
+                self.compose_mode =
+                    compose_mode_after_send(&mode, self.thread_root.as_deref(), sent_id);
             }
             Err(err) => {
                 self.compose_mode = mode;
@@ -1042,7 +1210,7 @@ impl App {
         channel: &str,
         body: &str,
         reply: Option<(String, String)>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let receiver = PublicKey::from_hex(peer)?;
         let mut tags = vec![Tag::parse(["p", peer])?];
         if let Some((parent, root)) = &reply {
@@ -1071,11 +1239,12 @@ impl App {
         // Delivery is decided by the recipient's copy alone. The self-addressed
         // wrap is an archival duplicate, and letting its verdict settle the row
         // would report success or failure for the wrong event.
-        self.pending_wraps.insert(to_peer.id.to_hex(), rumor_id);
+        self.pending_wraps
+            .insert(to_peer.id.to_hex(), rumor_id.clone());
 
         self.relay.publish(to_peer);
         self.relay.publish(to_self);
-        Ok(())
+        Ok(rumor_id)
     }
 
     /// `p` tags for everyone the body mentions, so their client can notify.
@@ -1218,7 +1387,7 @@ impl App {
         // channel event: the retry path is where that mistake would hide.
         if let Some(peer) = store::direct_peer(&channel).map(str::to_string) {
             match self.send_direct(&peer, &channel, &body, thread) {
-                Ok(()) => self.reload_timeline(),
+                Ok(_) => self.reload_timeline(),
                 Err(err) => self.error("could not resend", err.to_string()),
             }
             return;
@@ -1374,14 +1543,28 @@ impl App {
 
     fn open_thread(&mut self) {
         let Some(message) = self.selected_message() else {
+            self.info("select a message first");
             return;
         };
         let root = message.root.clone().unwrap_or_else(|| message.id.clone());
-        self.compose_mode = ComposeMode::Reply {
-            to: message.id.clone(),
-            root,
-        };
-        self.focus = Focus::Composer;
+        self.thread_selected = self
+            .timeline
+            .iter()
+            .enumerate()
+            .rfind(|(_, message)| message.belongs_to_thread(&root))
+            .map(|(index, _)| index);
+        self.thread_root = Some(root);
+        self.thread_scroll = 0;
+        self.thread_follow = true;
+        self.focus = Focus::Thread;
+    }
+
+    fn close_thread(&mut self) {
+        self.thread_root = None;
+        self.thread_selected = None;
+        self.thread_scroll = 0;
+        self.thread_follow = true;
+        self.focus = Focus::Timeline;
     }
 
     fn open_link(&mut self) {
@@ -1943,21 +2126,20 @@ impl App {
             Ingested::Ignored => return,
             Ingested::Profile { pubkey } => {
                 self.reload_profiles();
-                // A direct conversation is titled after its peer, so a profile
-                // arriving late must rename it rather than leave a hex stub.
+                // Only NIP-17 conversations own synthetic `dm:<pubkey>` rows.
+                // Legacy hidden NIP-29 rooms derive their labels from profiles
+                // in `Store::channels` and must keep their relay UUID.
                 if let Some(channel) = self
                     .channels
                     .iter()
-                    .find(|c| c.peer.as_deref() == Some(pubkey.as_str()))
+                    .find(|channel| store::direct_peer(&channel.id) == Some(pubkey.as_str()))
                 {
-                    let id = channel.id.clone();
                     let name = self.display_name(pubkey);
                     if channel.name != name {
                         let _ = self.store.upsert_direct_channel(pubkey, &name);
-                        let _ = id;
-                        self.reload_channels();
                     }
                 }
+                self.reload_channels();
                 return;
             }
             Ingested::ChannelMeta { .. } | Ingested::Membership { .. } => {
@@ -2220,6 +2402,25 @@ fn thread_tags(root: &str, parent: &str) -> Result<Vec<Tag>> {
     Ok(tags)
 }
 
+/// A thread composer stays a thread composer after a successful send. Advancing
+/// the direct parent to the new event preserves a natural reply chain while the
+/// root remains stable across any number of consecutive messages.
+fn compose_mode_after_send(
+    sent_as: &ComposeMode,
+    open_thread: Option<&str>,
+    sent_id: String,
+) -> ComposeMode {
+    match sent_as {
+        ComposeMode::Reply { root, .. } if open_thread == Some(root.as_str()) => {
+            ComposeMode::Reply {
+                to: sent_id,
+                root: root.clone(),
+            }
+        }
+        _ => ComposeMode::New,
+    }
+}
+
 /// Builds a direct message: one rumor, wrapped once for the recipient and once
 /// for the sender. Returns the rumor alongside both wraps so the caller can
 /// store the plaintext and publish only the ciphertext.
@@ -2360,6 +2561,38 @@ mod tests {
         let nested = thread_tags(&root, &parent).unwrap();
         assert_eq!(nested.len(), 2);
         assert_eq!(nested[1].as_slice()[3], "reply");
+    }
+
+    #[test]
+    fn two_consecutive_thread_sends_keep_advancing_the_reply_parent() {
+        let root = "root";
+        let first = ComposeMode::Reply {
+            to: "original".to_string(),
+            root: root.to_string(),
+        };
+
+        let second = compose_mode_after_send(&first, Some(root), "first-sent".to_string());
+        assert_eq!(
+            second,
+            ComposeMode::Reply {
+                to: "first-sent".to_string(),
+                root: root.to_string(),
+            }
+        );
+
+        let third = compose_mode_after_send(&second, Some(root), "second-sent".to_string());
+        assert_eq!(
+            third,
+            ComposeMode::Reply {
+                to: "second-sent".to_string(),
+                root: root.to_string(),
+            }
+        );
+        assert_eq!(
+            compose_mode_after_send(&third, None, "outside-thread".to_string()),
+            ComposeMode::New,
+            "leaving the thread must restore ordinary channel composition"
+        );
     }
 
     /// Every action that has no private equivalent must be refused, and every

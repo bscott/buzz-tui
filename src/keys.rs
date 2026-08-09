@@ -1430,6 +1430,16 @@ mod tests {
             map.resolve(Scope::Insert, &[], chord("j")),
             Resolution::Unbound
         );
+        // `r` is a reply command only while browsing; in the composer it must
+        // remain an ordinary printable character.
+        assert_eq!(
+            map.resolve(Scope::Normal, &[], chord("r")),
+            Resolution::Run(Action::Reply)
+        );
+        assert_eq!(
+            map.resolve(Scope::Insert, &[], chord("r")),
+            Resolution::Unbound
+        );
     }
 
     #[test]
