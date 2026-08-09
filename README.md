@@ -303,10 +303,14 @@ python3 -m http.server -d site 8000
 ```
 
 That coupling is also why the Pages workflow triggers on `src/**` and
-`Cargo.toml` as well as `web/**`. To serve it from a custom domain, set a
-repository variable named `PAGES_DOMAIN`; the build writes the `CNAME` for you.
-Assets are referenced relatively, so the page works both under
-`/buzz-tui/` and at the root of a domain.
+`Cargo.toml` as well as `web/**`: publishing only on `web/**` would let the page
+fall behind the code it documents.
+
+The custom domain lives in the repository's **Settings → Pages**, not in this
+tree. When Pages is published by a workflow rather than from a branch, GitHub
+ignores any `CNAME` file in the artefact, so the build deliberately does not
+write one. Assets are referenced relatively, so the page renders correctly
+either at a domain root or under a `/buzz-tui/` subpath.
 
 ## License
 

@@ -126,11 +126,6 @@ def main() -> int:
     parser.add_argument("--binary", default="target/release/buzztui")
     parser.add_argument("--out", default="site")
     parser.add_argument("--repo", default="bscott/buzz-tui")
-    parser.add_argument(
-        "--domain",
-        default="",
-        help="custom domain; writes a CNAME so Pages serves at the root",
-    )
     args = parser.parse_args()
 
     binary = Path(args.binary)
@@ -158,9 +153,10 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     (out / "index.html").write_text(page)
     shutil.copy(WEB / "style.css", out / "style.css")
-    # Pages serves a custom domain only when the deployed tree names it.
-    if args.domain:
-        (out / "CNAME").write_text(args.domain + "\n")
+    # No CNAME is written, deliberately. When Pages is published by a workflow
+    # rather than from a branch, GitHub ignores a CNAME file in the artefact and
+    # takes the custom domain from the repository's Pages settings. Writing one
+    # here would be inert while implying it did something.
     # Stops Pages running the output through Jekyll, which would ignore any
     # file beginning with an underscore.
     (out / ".nojekyll").touch()

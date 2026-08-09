@@ -46,8 +46,7 @@ jobs:
           python3 web/build.py \
             --binary target/release/buzztui \
             --out site \
-            --repo "${{ github.repository }}" \
-            --domain "${{ vars.PAGES_DOMAIN }}"
+            --repo "${{ github.repository }}"
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
