@@ -157,7 +157,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, narrow: bool) {
             2 => format!("{} and {} are typing", typing[0], typing[1]),
             n => format!("{n} people are typing"),
         };
-        left.push(Span::styled(format!("  \u{00b7}  {who}\u{2026}"), palette.accent_text()));
+        left.push(Span::styled(
+            format!("  \u{00b7}  {who}\u{2026}"),
+            palette.accent_text(),
+        ));
     }
 
     frame.render_widget(Paragraph::new(Line::from(left)), area);
@@ -230,7 +233,10 @@ fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
                 .find(|m| &m.id == to)
                 .map(|m| app.display_name(&m.author))
                 .unwrap_or_else(|| "a message".to_string());
-            (Some(format!(" replying to {who} ")), palette.accent_strong())
+            (
+                Some(format!(" replying to {who} ")),
+                palette.accent_strong(),
+            )
         }
         ComposeMode::Edit { .. } => (Some(" editing ".to_string()), palette.chip_alt()),
     };
@@ -260,7 +266,8 @@ fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
         let hint = if app.active.is_some() {
             format!(
                 "message \u{2014} {} for commands, {} for keys",
-                "/", app.keymap.hint(Action::OpenHelp)
+                "/",
+                app.keymap.hint(Action::OpenHelp)
             )
         } else {
             "open a channel to start writing".to_string()
@@ -302,7 +309,11 @@ fn render_members(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("  {}", app.members.len()), palette.pending()),
     ])];
 
-    for (pubkey, role) in app.members.iter().take(inner.height.saturating_sub(1) as usize) {
+    for (pubkey, role) in app
+        .members
+        .iter()
+        .take(inner.height.saturating_sub(1) as usize)
+    {
         let presence = app
             .presence
             .get(pubkey)
@@ -370,10 +381,8 @@ fn hint_bar(app: &App) -> Option<Line<'static>> {
         let mut hints: Vec<(Chord, Action)> = Vec::new();
         let mut jumped = false;
         for (chord, action) in &app.hints {
-            if matches!(action, Action::JumpChannel(_)) {
-                if std::mem::replace(&mut jumped, true) {
-                    continue;
-                }
+            if matches!(action, Action::JumpChannel(_)) && std::mem::replace(&mut jumped, true) {
+                continue;
             }
             if !hints.iter().any(|(seen, _)| seen == chord) {
                 hints.push((*chord, *action));
@@ -386,10 +395,7 @@ fn hint_bar(app: &App) -> Option<Line<'static>> {
                 continue;
             }
             spans.push(Span::styled(chord.to_string(), palette.accent_strong()));
-            spans.push(Span::styled(
-                format!(" {}  ", action.help()),
-                palette.dim(),
-            ));
+            spans.push(Span::styled(format!(" {}  ", action.help()), palette.dim()));
         }
         return Some(Line::from(spans));
     }
@@ -398,10 +404,7 @@ fn hint_bar(app: &App) -> Option<Line<'static>> {
         return None;
     }
 
-    let mut spans = vec![
-        widgets::chip("NAVIGATE", palette.chip()),
-        Span::raw(" "),
-    ];
+    let mut spans = vec![widgets::chip("NAVIGATE", palette.chip()), Span::raw(" ")];
     for action in [
         Action::FocusComposer,
         Action::Reply,

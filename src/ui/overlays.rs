@@ -49,8 +49,7 @@ fn render_help(frame: &mut Frame, app: &App, help: &Help, title: &str) {
         return;
     };
 
-    let [filter, list] =
-        Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+    let [filter, list] = Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
 
     let query = if help.query.text.is_empty() {
         Span::styled("type to filter", palette.pending())
@@ -62,7 +61,10 @@ fn render_help(frame: &mut Frame, app: &App, help: &Help, title: &str) {
             Span::styled("/ ", palette.accent_strong()),
             query,
         ])),
-        Rect { height: 1, ..filter },
+        Rect {
+            height: 1,
+            ..filter
+        },
     );
 
     if help.is_empty() {
@@ -125,8 +127,7 @@ fn render_picker(frame: &mut Frame, app: &App, picker: &Picker) {
         return;
     };
 
-    let [filter, list] =
-        Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+    let [filter, list] = Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
     let query = if picker.query.text.is_empty() {
         Span::styled("type to filter", palette.pending())
     } else {
@@ -137,7 +138,10 @@ fn render_picker(frame: &mut Frame, app: &App, picker: &Picker) {
             Span::styled("\u{203a} ", palette.accent_strong()),
             query,
         ])),
-        Rect { height: 1, ..filter },
+        Rect {
+            height: 1,
+            ..filter
+        },
     );
 
     if picker.filtered.is_empty() {
@@ -164,7 +168,10 @@ fn render_picker(frame: &mut Frame, app: &App, picker: &Picker) {
             Style::new().fg(palette.subtext0)
         };
         let mut spans = vec![
-            Span::styled(if selected { " \u{25b8} " } else { "   " }, palette.accent_text()),
+            Span::styled(
+                if selected { " \u{25b8} " } else { "   " },
+                palette.accent_text(),
+            ),
             Span::styled(
                 text::truncate_end(&item.label, list.width.saturating_sub(12) as usize)
                     .into_owned(),
@@ -202,8 +209,7 @@ fn render_prompt(frame: &mut Frame, app: &App, prompt: &Prompt) {
         return;
     };
 
-    let [field, error] =
-        Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
+    let [field, error] = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
 
     let block = Block::bordered().border_style(palette.border_focused());
     let inner = block.inner(field);
@@ -296,8 +302,7 @@ fn render_search(frame: &mut Frame, app: &App, search: &Search) {
         return;
     };
 
-    let [filter, list] =
-        Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+    let [filter, list] = Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
     let scope = search
         .scope
         .as_ref()
@@ -310,7 +315,10 @@ fn render_search(frame: &mut Frame, app: &App, search: &Search) {
             Span::styled(search.query.text.clone(), palette.base()),
             Span::styled(scope, palette.pending()),
         ])),
-        Rect { height: 1, ..filter },
+        Rect {
+            height: 1,
+            ..filter
+        },
     );
 
     if search.results.is_empty() {
@@ -344,11 +352,18 @@ fn render_search(frame: &mut Frame, app: &App, search: &Search) {
             .unwrap_or_else(|| message.channel.clone());
         lines.push(
             Line::from(vec![
-                Span::styled(if selected { " \u{25b8} " } else { "   " }, palette.accent_text()),
+                Span::styled(
+                    if selected { " \u{25b8} " } else { "   " },
+                    palette.accent_text(),
+                ),
                 Span::styled(app.display_name(&message.author), palette.accent_strong()),
                 Span::styled(format!("  {where_}"), palette.pending()),
             ])
-            .style(if selected { palette.selected() } else { Style::new() }),
+            .style(if selected {
+                palette.selected()
+            } else {
+                Style::new()
+            }),
         );
         lines.push(
             Line::from(Span::styled(
@@ -361,7 +376,11 @@ fn render_search(frame: &mut Frame, app: &App, search: &Search) {
                 ),
                 palette.muted(),
             ))
-            .style(if selected { palette.selected() } else { Style::new() }),
+            .style(if selected {
+                palette.selected()
+            } else {
+                Style::new()
+            }),
         );
         if lines.len() >= list.height as usize {
             break;
@@ -371,14 +390,8 @@ fn render_search(frame: &mut Frame, app: &App, search: &Search) {
 }
 
 fn render_profile(frame: &mut Frame, app: &mut App, pubkey: &str) {
-    let Some(area) = widgets::modal(
-        frame,
-        &app.palette,
-        "profile",
-        62,
-        14,
-        Some("esc to close"),
-    ) else {
+    let Some(area) = widgets::modal(frame, &app.palette, "profile", 62, 14, Some("esc to close"))
+    else {
         return;
     };
 
@@ -396,11 +409,8 @@ fn render_profile(frame: &mut Frame, app: &mut App, pubkey: &str) {
         .flatten()
         .map(|picture| app.config.resolve_media(&picture));
     let avatar_columns = if avatar.is_some() { 14 } else { 0 };
-    let [portrait, details] = Layout::horizontal([
-        Constraint::Length(avatar_columns),
-        Constraint::Fill(1),
-    ])
-    .areas(area);
+    let [portrait, details] =
+        Layout::horizontal([Constraint::Length(avatar_columns), Constraint::Fill(1)]).areas(area);
 
     if let Some(url) = avatar {
         app.media.request(&url);
@@ -457,7 +467,10 @@ fn render_profile(frame: &mut Frame, app: &mut App, pubkey: &str) {
         ),
     ]));
     if app.is_me(pubkey) {
-        lines.push(Line::from(Span::styled("this is you", palette.accent_text())));
+        lines.push(Line::from(Span::styled(
+            "this is you",
+            palette.accent_text(),
+        )));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), details);
 }

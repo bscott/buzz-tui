@@ -67,9 +67,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .unwrap_or(0);
     let height = content.height as usize;
-    let offset = cursor_row.saturating_sub(height.saturating_sub(2)).min(
-        rows.len().saturating_sub(height.min(rows.len())),
-    );
+    let offset = cursor_row
+        .saturating_sub(height.saturating_sub(2))
+        .min(rows.len().saturating_sub(height.min(rows.len())));
 
     let palette = &app.palette;
     let budget = content.width.saturating_sub(2) as usize;
@@ -93,7 +93,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 ]));
             }
             Row::Empty(label) => {
-                lines.push(Line::from(Span::styled(format!("   {label}"), palette.pending())));
+                lines.push(Line::from(Span::styled(
+                    format!("   {label}"),
+                    palette.pending(),
+                )));
             }
             Row::Channel(channel) => {
                 lines.push(channel_line(app, channel, budget));
@@ -180,7 +183,10 @@ fn channel_line<'a>(app: &'a App, channel: &'a Channel, budget: usize) -> Line<'
     let name = text::truncate_end(&channel.name, name_budget).into_owned();
 
     let mut spans = vec![
-        Span::styled(if channel.pinned { "\u{25c6}" } else { " " }, palette.pending()),
+        Span::styled(
+            if channel.pinned { "\u{25c6}" } else { " " },
+            palette.pending(),
+        ),
         Span::styled(format!("{} ", channel.sigil()), base.fg(palette.overlay1)),
         Span::styled(text::pad_to(&name, name_budget), name_style),
     ];

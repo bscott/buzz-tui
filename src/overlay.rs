@@ -170,7 +170,9 @@ impl Query {
                 true
             }
             (KeyCode::Char(c), m)
-                if !m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+                if !m.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
             {
                 self.text.push(c);
                 true
@@ -288,7 +290,9 @@ impl Picker {
     }
 
     pub fn selection(&self) -> Option<&PickerItem> {
-        self.filtered.get(self.cursor).map(|&index| &self.items[index])
+        self.filtered
+            .get(self.cursor)
+            .map(|&index| &self.items[index])
     }
 
     fn refilter(&mut self) {
@@ -311,7 +315,9 @@ impl Picker {
                     None => Outcome::Close,
                 };
             }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) | (KeyCode::Tab, _) => {
+            (KeyCode::Down, _)
+            | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+            | (KeyCode::Tab, _) => {
                 self.cursor = step(self.cursor, self.filtered.len(), 1);
                 return Outcome::Consumed;
             }
@@ -501,7 +507,10 @@ impl Confirm {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 Outcome::Submit(Submission::Confirmed(self.action.clone()))
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h')
+            KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Tab
+            | KeyCode::Char('h')
             | KeyCode::Char('l') => {
                 self.yes = !self.yes;
                 Outcome::Consumed

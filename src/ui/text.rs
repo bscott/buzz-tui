@@ -341,14 +341,21 @@ fn starts_token(body: &str, pos: usize) -> bool {
 
 /// A URL runs to the first character that cannot plausibly be inside one.
 fn url_terminator(ch: char) -> bool {
-    ch.is_whitespace() || matches!(ch, '`' | '<' | '>' | '"' | '\'' | '\\' | '|' | '^' | '{' | '}')
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '`' | '<' | '>' | '"' | '\'' | '\\' | '|' | '^' | '{' | '}'
+        )
 }
 
 /// Sentences end in punctuation and URLs are quoted inside brackets, so the
 /// trailing run of punctuation belongs to the prose rather than to the link.
 fn trim_url_tail(url: &str) -> &str {
     url.trim_end_matches(|ch: char| {
-        matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\'' | '>')
+        matches!(
+            ch,
+            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\'' | '>'
+        )
     })
 }
 
@@ -486,8 +493,14 @@ mod tests {
 
     #[test]
     fn wrap_splits_a_word_longer_than_the_pane() {
-        assert_eq!(wrap("supercalifragilistic", 6), ["superc", "alifra", "gilist", "ic"]);
-        assert_eq!(wrap("hi supercalifragilistic", 6), ["hi", "superc", "alifra", "gilist", "ic"]);
+        assert_eq!(
+            wrap("supercalifragilistic", 6),
+            ["superc", "alifra", "gilist", "ic"]
+        );
+        assert_eq!(
+            wrap("hi supercalifragilistic", 6),
+            ["hi", "superc", "alifra", "gilist", "ic"]
+        );
     }
 
     #[test]
@@ -571,7 +584,10 @@ mod tests {
 
     #[test]
     fn links_strip_trailing_punctuation_and_deduplicate() {
-        assert_eq!(links("see https://example.com/a.  "), ["https://example.com/a"]);
+        assert_eq!(
+            links("see https://example.com/a.  "),
+            ["https://example.com/a"]
+        );
         assert_eq!(
             links("(https://example.com/b) and again https://example.com/b"),
             ["https://example.com/b"]

@@ -122,12 +122,12 @@ fn main() -> Result<()> {
             println!("config  {}", paths.config.display());
             println!("keys    {}", paths.secret.display());
             println!("cache   {}", paths.cache.display());
-            if let Ok(Some(secret)) = config::load_secret(&paths) {
-                if let Ok(keys) = Keys::parse(&secret) {
-                    let me = keys.public_key().to_hex();
-                    println!("data    {}", paths.db_for(&me).display());
-                    println!("media   {}", paths.media_for(&me).display());
-                }
+            if let Ok(Some(secret)) = config::load_secret(&paths)
+                && let Ok(keys) = Keys::parse(&secret)
+            {
+                let me = keys.public_key().to_hex();
+                println!("data    {}", paths.db_for(&me).display());
+                println!("media   {}", paths.media_for(&me).display());
             }
             println!("log     {}", paths.log.display());
             Ok(())
@@ -255,7 +255,11 @@ fn print_keys(paths: &Paths) {
     println!("leader  {}\n", keymap.leader);
     for (group, rows) in keymap.help_rows() {
         println!("{}", group.label());
-        let width = rows.iter().map(|r| r.keys.chars().count()).max().unwrap_or(0);
+        let width = rows
+            .iter()
+            .map(|r| r.keys.chars().count())
+            .max()
+            .unwrap_or(0);
         for row in rows {
             println!(
                 "  {:<width$}  {:<30}{}",
@@ -267,7 +271,10 @@ fn print_keys(paths: &Paths) {
         }
         println!();
     }
-    println!("rebind by action name in {}", paths.root.join("keys.toml").display());
+    println!(
+        "rebind by action name in {}",
+        paths.root.join("keys.toml").display()
+    );
 }
 
 fn doctor(paths: &Paths, config: &Config) -> Result<()> {
@@ -298,7 +305,11 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
         }
     }
 
-    match config::load_secret(paths).ok().flatten().and_then(|s| Keys::parse(&s).ok()) {
+    match config::load_secret(paths)
+        .ok()
+        .flatten()
+        .and_then(|s| Keys::parse(&s).ok())
+    {
         Some(keys) => {
             let me = keys.public_key().to_hex();
             let db = paths.db_for(&me);
@@ -342,7 +353,10 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
     let keymap = Keymap::with_overrides(file);
     diagnostics.extend(keymap.diagnostics.iter().cloned());
     if diagnostics.is_empty() {
-        println!("keys       {} bindings", keymap.help_rows().values().map(Vec::len).sum::<usize>());
+        println!(
+            "keys       {} bindings",
+            keymap.help_rows().values().map(Vec::len).sum::<usize>()
+        );
     } else {
         for problem in &diagnostics {
             println!("keys       ! {problem}");

@@ -201,7 +201,6 @@ impl Composer {
         true
     }
 
-
     /// Byte offset of the cursor within [`Composer::text`]. Always a `char`
     /// boundary, which is what lets callers slice the body around it safely.
     pub fn cursor(&self) -> usize {
@@ -366,7 +365,9 @@ impl Composer {
     }
 
     fn line_end(&self, at: usize) -> usize {
-        self.text[at..].find('\n').map_or(self.text.len(), |i| at + i)
+        self.text[at..]
+            .find('\n')
+            .map_or(self.text.len(), |i| at + i)
     }
 
     fn word_start_before(&self, at: usize) -> usize {

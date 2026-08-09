@@ -40,9 +40,18 @@ const PREVIOUS_FAILURE: &str = "previously failed to load";
 
 /// What happened to an image we asked for, delivered back to the event loop.
 pub enum MediaEvent {
-    Loaded { url: String, image: Box<DynamicImage> },
-    Failed { url: String, reason: String },
-    Resized(ResizeRequest),
+    Loaded {
+        url: String,
+        image: Box<DynamicImage>,
+    },
+    Failed {
+        url: String,
+        reason: String,
+    },
+    /// Boxed because a resize request is an order of magnitude larger than the
+    /// other variants, and every message on this channel would otherwise pay
+    /// for its size.
+    Resized(Box<ResizeRequest>),
 }
 
 pub enum Status<'a> {
@@ -56,6 +65,11 @@ pub enum Status<'a> {
 /// One tracked URL. Dimensions are kept alongside the protocol because the
 /// layout has to know how tall an image wants to be before it draws it, and
 /// the protocol does not surrender the source image once it owns it.
+///
+/// `Ready` dwarfs the other variants, but it is also the one the render path
+/// touches every frame; boxing it would trade a little memory for a pointer
+/// chase on the hot path.
+#[allow(clippy::large_enum_variant)]
 enum Entry {
     Loading,
     Ready {
@@ -231,6 +245,7 @@ impl Media {
                 self.entries.insert(url, Entry::Failed(reason));
             }
             MediaEvent::Resized(request) => {
+                let request = *request;
                 let queued = self.queue().pop_front();
                 let response = match request.resize_encode() {
                     Ok(response) => response,
@@ -523,7 +538,8 @@ async fn download(
         )));
     }
 
-    let mut body = Vec::with_capacity(response.content_length().unwrap_or(0).min(max_bytes) as usize);
+    let mut body =
+        Vec::with_capacity(response.content_length().unwrap_or(0).min(max_bytes) as usize);
     while let Some(chunk) = response
         .chunk()
         .await
@@ -616,7 +632,7 @@ async fn forward_resizes(
     while let Some(request) = requests.recv().await {
         let mut queue = pending.lock().unwrap_or_else(|err| err.into_inner());
         queue.push_back(url.clone());
-        if events.send(MediaEvent::Resized(request)).is_err() {
+        if events.send(MediaEvent::Resized(Box::new(request))).is_err() {
             return;
         }
     }
@@ -681,7 +697,13 @@ fn extension_for(content_type: Option<&str>, url: &str) -> &'static str {
 
 fn extension_from_url(url: &str) -> &'static str {
     let path = url.split(['?', '#']).next().unwrap_or(url);
-    match path.rsplit('.').next().unwrap_or_default().to_ascii_lowercase().as_str() {
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "png" => "png",
         "jpg" | "jpeg" => "jpg",
         "gif" => "gif",
@@ -711,10 +733,7 @@ mod tests {
         assert_eq!(parse_protocol("kitty"), Some(ProtocolType::Kitty));
         assert_eq!(parse_protocol("  SIXEL "), Some(ProtocolType::Sixel));
         assert_eq!(parse_protocol("iterm2"), Some(ProtocolType::Iterm2));
-        assert_eq!(
-            parse_protocol("halfblocks"),
-            Some(ProtocolType::Halfblocks)
-        );
+        assert_eq!(parse_protocol("halfblocks"), Some(ProtocolType::Halfblocks));
         // "auto" and anything unrecognised defer to detection.
         assert_eq!(parse_protocol("auto"), None);
         assert_eq!(parse_protocol(""), None);
@@ -734,7 +753,6 @@ mod tests {
             (1, 1)
         );
     }
-
 
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;

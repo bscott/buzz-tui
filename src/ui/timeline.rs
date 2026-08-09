@@ -28,7 +28,10 @@ const GROUP_WINDOW: i64 = 300;
 enum Row {
     Text(Line<'static>),
     /// The first row of an image block.
-    ImageTop { url: String, rows: u16 },
+    ImageTop {
+        url: String,
+        rows: u16,
+    },
     /// A continuation row of an image block. It carries nothing because the
     /// picture is drawn from its top row; this only reserves the space.
     ImageBody,
@@ -107,8 +110,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 "you are not a member yet, so history may be hidden"
             },
             &[
-                (&app.keymap.hint(crate::keys::Action::FocusComposer), "write something"),
-                (&app.keymap.hint(crate::keys::Action::JoinChannel), "join the channel"),
+                (
+                    &app.keymap.hint(crate::keys::Action::FocusComposer),
+                    "write something",
+                ),
+                (
+                    &app.keymap.hint(crate::keys::Action::JoinChannel),
+                    "join the channel",
+                ),
             ],
         );
         return;
@@ -185,7 +194,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             }
             Status::Loading => {
                 frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled("\u{25a3} loading image", palette_dim))),
+                    Paragraph::new(Line::from(Span::styled(
+                        "\u{25a3} loading image",
+                        palette_dim,
+                    ))),
                     Rect { height: 1, ..rect },
                 );
             }
@@ -228,7 +240,11 @@ fn layout(app: &App, width: usize) -> Vec<Row> {
             let day = when.ordinal() as i32 + when.year() * 1000;
             if last_day != Some(day) {
                 last_day = Some(day);
-                rows.push(Row::Text(separator_line(palette, &format_day(&when), width)));
+                rows.push(Row::Text(separator_line(
+                    palette,
+                    &format_day(&when),
+                    width,
+                )));
             }
         }
 
@@ -382,9 +398,9 @@ fn author_colour(palette: &Palette, pubkey: &str) -> ratatui::style::Color {
         palette.yellow,
         palette.blue,
     ];
-    let hash = pubkey
-        .bytes()
-        .fold(0u32, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte as u32));
+    let hash = pubkey.bytes().fold(0u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(byte as u32)
+    });
     choices[(hash as usize) % choices.len()]
 }
 
@@ -425,7 +441,10 @@ fn body_rows(app: &App, message: &Message, width: usize, selected: bool) -> Vec<
                         (t.to_string(), style)
                     }
                 };
-                spans.push(Span::styled(content, if dimmed { palette.pending() } else { style }));
+                spans.push(Span::styled(
+                    content,
+                    if dimmed { palette.pending() } else { style },
+                ));
             }
             let mut line = Line::from(spans);
             if selected {
@@ -490,7 +509,10 @@ fn reaction_line(app: &App, message: &Message, selected: bool) -> Line<'static> 
 
 fn format_day(when: &DateTime<Local>) -> String {
     let today = Local::now();
-    let days = today.date_naive().signed_duration_since(when.date_naive()).num_days();
+    let days = today
+        .date_naive()
+        .signed_duration_since(when.date_naive())
+        .num_days();
     match days {
         0 => "today".to_string(),
         1 => "yesterday".to_string(),

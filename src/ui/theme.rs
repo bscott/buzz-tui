@@ -369,7 +369,9 @@ impl Palette {
     }
 
     pub fn quote(&self) -> Style {
-        Style::new().fg(self.overlay1).add_modifier(Modifier::ITALIC)
+        Style::new()
+            .fg(self.overlay1)
+            .add_modifier(Modifier::ITALIC)
     }
 }
 
@@ -412,7 +414,12 @@ fn parse_hex(body: &str, original: &str) -> Result<Color> {
         char::from(byte)
             .to_digit(16)
             .map(|value| value as u8)
-            .ok_or_else(|| anyhow!("`{original}` is not a hex colour; `{}` is not a hex digit", char::from(byte)))
+            .ok_or_else(|| {
+                anyhow!(
+                    "`{original}` is not a hex colour; `{}` is not a hex digit",
+                    char::from(byte)
+                )
+            })
     };
     match digits.len() {
         // The short form doubles each digit, so `#abc` is `#aabbcc`.
@@ -519,12 +526,24 @@ mod tests {
 
     #[test]
     fn colours_parse_from_every_documented_spelling() {
-        assert_eq!(parse_color("#89b4fa").unwrap(), Color::Rgb(0x89, 0xb4, 0xfa));
+        assert_eq!(
+            parse_color("#89b4fa").unwrap(),
+            Color::Rgb(0x89, 0xb4, 0xfa)
+        );
         assert_eq!(parse_color("#ABC").unwrap(), Color::Rgb(0xaa, 0xbb, 0xcc));
-        assert_eq!(parse_color("  #abc  ").unwrap(), Color::Rgb(0xaa, 0xbb, 0xcc));
+        assert_eq!(
+            parse_color("  #abc  ").unwrap(),
+            Color::Rgb(0xaa, 0xbb, 0xcc)
+        );
         assert_eq!(parse_color("rgb(1,2,3)").unwrap(), Color::Rgb(1, 2, 3));
-        assert_eq!(parse_color("rgb( 1 , 2 , 3 )").unwrap(), Color::Rgb(1, 2, 3));
-        assert_eq!(parse_color("rgb(255, 255, 255)").unwrap(), Color::Rgb(255, 255, 255));
+        assert_eq!(
+            parse_color("rgb( 1 , 2 , 3 )").unwrap(),
+            Color::Rgb(1, 2, 3)
+        );
+        assert_eq!(
+            parse_color("rgb(255, 255, 255)").unwrap(),
+            Color::Rgb(255, 255, 255)
+        );
         assert_eq!(parse_color("200").unwrap(), Color::Indexed(200));
         assert_eq!(parse_color("0").unwrap(), Color::Indexed(0));
         assert_eq!(parse_color("255").unwrap(), Color::Indexed(255));
@@ -630,14 +649,23 @@ mod tests {
             luminance(paper.text) < luminance(paper.panel_bg),
             "paper must draw dark text on a light panel"
         );
-        for surface in [paper.panel_bg, paper.surface_dim, paper.surface0, paper.surface1] {
+        for surface in [
+            paper.panel_bg,
+            paper.surface_dim,
+            paper.surface0,
+            paper.surface1,
+        ] {
             assert!(
                 luminance(surface) > luminance(paper.text) + 40.0,
                 "every paper surface must stay clear of the text colour"
             );
         }
         // The dark themes hold the opposite invariant.
-        for palette in [Palette::catppuccin(), Palette::tokyo_night(), Palette::gruvbox()] {
+        for palette in [
+            Palette::catppuccin(),
+            Palette::tokyo_night(),
+            Palette::gruvbox(),
+        ] {
             assert!(luminance(palette.text) > luminance(palette.panel_bg));
         }
     }

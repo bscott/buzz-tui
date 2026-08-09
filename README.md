@@ -61,6 +61,26 @@ it is read from your own keymap.</sub>
 
 ## Install
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/bscott/buzz-tui/main/install.sh | sh
+```
+
+Fetches the latest release for your platform, checks it against the published
+`SHA256SUMS`, and installs to `~/.local/bin`. Prebuilt binaries cover Linux
+(`x86_64`, `aarch64`, statically linked against musl so any distribution works)
+and macOS (Intel and Apple Silicon).
+
+| Variable | Effect |
+|---|---|
+| `BUZZTUI_VERSION` | Install a specific tag rather than the latest |
+| `BUZZTUI_BIN_DIR` | Install somewhere other than `~/.local/bin` |
+
+If you would rather read it first, the script is
+[`install.sh`](install.sh) — it is POSIX `sh`, refuses to install on a checksum
+mismatch, and never writes outside the directory you point it at.
+
+### From source
+
 Requires Rust 1.90 or newer.
 
 ```bash

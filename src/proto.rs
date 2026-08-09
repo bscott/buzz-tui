@@ -63,7 +63,8 @@ pub mod kinds {
     pub const TIMELINE: [u16; 2] = [CHAT, CHAT_V2];
 
     /// Every kind a connected client subscribes to for a channel.
-    pub const CHANNEL_STREAM: [u16; 6] = [CHAT, CHAT_V2, CHAT_EDIT, REACTION, DELETION, ADMIN_DELETE];
+    pub const CHANNEL_STREAM: [u16; 6] =
+        [CHAT, CHAT_V2, CHAT_EDIT, REACTION, DELETION, ADMIN_DELETE];
 
     /// Converts wire numbers into the type `Filter::kinds` expects.
     pub fn filter<I: IntoIterator<Item = u16>>(kinds: I) -> impl Iterator<Item = Kind> {

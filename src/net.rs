@@ -138,7 +138,9 @@ pub fn spawn(relay_url: String, keys: Keys) -> (Relay, UnboundedReceiver<Update>
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (update_tx, update_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        Connection::new(relay_url, keys, cmd_rx, update_tx).run().await;
+        Connection::new(relay_url, keys, cmd_rx, update_tx)
+            .run()
+            .await;
     });
     (Relay { tx: cmd_tx }, update_rx)
 }
@@ -406,11 +408,10 @@ impl Connection {
                             // is only dropped from the queue once the socket has
                             // taken it, so a blink costs a retry, not a message.
                             self.outbox.push_back(*event);
-                            if authenticated {
-                                if let Err(reason) = self.flush(&mut sink).await {
+                            if authenticated
+                                && let Err(reason) = self.flush(&mut sink).await {
                                     return Exit::Retry(reason);
                                 }
-                            }
                         }
                         Command::Subscribe { id, filters, oneshot } => {
                             self.subscriptions.insert(id.clone(), (filters.clone(), oneshot));
@@ -532,12 +533,16 @@ mod tests {
             std::task::Poll::Ready(Ok(()))
         }
 
-        fn start_send(mut self: std::pin::Pin<&mut Self>, item: WsMessage) -> Result<(), Self::Error> {
+        fn start_send(
+            mut self: std::pin::Pin<&mut Self>,
+            item: WsMessage,
+        ) -> Result<(), Self::Error> {
             if self.remaining == 0 {
                 return Err(std::io::Error::other("socket closed"));
             }
             self.remaining -= 1;
-            self.written.push(item.to_text().unwrap_or_default().to_string());
+            self.written
+                .push(item.to_text().unwrap_or_default().to_string());
             Ok(())
         }
 

@@ -30,7 +30,6 @@ const CONFIG_HEADER: &str = r#"# buzztui configuration — https://github.com/bs
 #            gateway = "https://media.example.com"
 "#;
 
-
 /// Resolved locations of every file buzztui reads or writes.
 ///
 /// The cache is deliberately not a single path. It holds decrypted direct
@@ -109,6 +108,7 @@ impl Paths {
 /// User-facing configuration, persisted as TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct Config {
     /// WebSocket URL of the active Buzz relay. One relay is one community.
     pub relay: String,
@@ -122,18 +122,6 @@ pub struct Config {
     /// Per-token palette overrides applied on top of the named theme, keyed by
     /// the token name: `accent = "#f5c2e7"`.
     pub theme: BTreeMap<String, String>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            relay: String::new(),
-            gateway: None,
-            ui: UiConfig::default(),
-            media: MediaConfig::default(),
-            theme: BTreeMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,8 +202,8 @@ impl Config {
         }
         let raw = fs::read_to_string(&paths.config)
             .with_context(|| format!("reading {}", paths.config.display()))?;
-        let config: Self = toml::from_str(&raw)
-            .with_context(|| format!("parsing {}", paths.config.display()))?;
+        let config: Self =
+            toml::from_str(&raw).with_context(|| format!("parsing {}", paths.config.display()))?;
         Ok(config)
     }
 
@@ -232,11 +220,11 @@ impl Config {
     /// so that a buzztui-specific setting can override the shared Buzz variable.
     pub fn apply_env(&mut self) {
         for key in ["BUZZTUI_RELAY", "BUZZ_RELAY_URL"] {
-            if let Ok(value) = std::env::var(key) {
-                if !value.trim().is_empty() {
-                    self.relay = value.trim().to_string();
-                    return;
-                }
+            if let Ok(value) = std::env::var(key)
+                && !value.trim().is_empty()
+            {
+                self.relay = value.trim().to_string();
+                return;
             }
         }
     }
@@ -280,7 +268,6 @@ impl Config {
         }
         format!("{}/{}", self.http_origin(), url.trim_start_matches('/'))
     }
-
 }
 
 /// Reads the stored secret key, preferring `BUZZTUI_NSEC` when it is set.
@@ -408,8 +395,10 @@ mod tests {
 
     #[test]
     fn http_origin_maps_websocket_schemes() {
-        let mut config = Config::default();
-        config.relay = "ws://localhost:3000".to_string();
+        let mut config = Config {
+            relay: "ws://localhost:3000".to_string(),
+            ..Default::default()
+        };
         assert_eq!(config.http_origin(), "http://localhost:3000");
         config.relay = "wss://buzz.example.com/".to_string();
         assert_eq!(config.http_origin(), "https://buzz.example.com");

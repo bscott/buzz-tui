@@ -47,14 +47,35 @@ pub struct Rumor<'a> {
 pub enum Ingested {
     /// Nothing we model, or a duplicate we already had.
     Ignored,
-    Message { channel: String, id: String },
-    Reaction { channel: Option<String>, target: String },
-    Deleted { channel: Option<String>, target: String },
-    Edited { channel: Option<String>, target: String },
-    ChannelMeta { channel: String },
-    Members { channel: String },
-    Profile { pubkey: String },
-    Membership { channel: String, joined: bool },
+    Message {
+        channel: String,
+        id: String,
+    },
+    Reaction {
+        channel: Option<String>,
+        target: String,
+    },
+    Deleted {
+        channel: Option<String>,
+        target: String,
+    },
+    Edited {
+        channel: Option<String>,
+        target: String,
+    },
+    ChannelMeta {
+        channel: String,
+    },
+    Members {
+        channel: String,
+    },
+    Profile {
+        pubkey: String,
+    },
+    Membership {
+        channel: String,
+        joined: bool,
+    },
 }
 
 impl Ingested {
@@ -871,8 +892,10 @@ impl Store {
              ORDER BY e.created_at DESC
              LIMIT ?3",
         )?;
-        let rows =
-            stmt.query_map(params![fts_query(trimmed), channel, limit], message_from_row)?;
+        let rows = stmt.query_map(
+            params![fts_query(trimmed), channel, limit],
+            message_from_row,
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -914,7 +937,6 @@ impl Store {
         )?;
         Ok(())
     }
-
 
     // ----------------------------------------------------------- media cache
 

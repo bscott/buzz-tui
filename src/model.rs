@@ -109,7 +109,12 @@ impl Profile {
     /// The display name, falling back to a shortened pubkey so that every
     /// author has a stable, non-empty label.
     pub fn label(&self) -> String {
-        match self.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        match self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
             Some(name) => name.to_string(),
             None => crate::proto::short_pubkey(&self.pubkey),
         }

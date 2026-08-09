@@ -29,9 +29,7 @@ pub enum Identity {
 impl Identity {
     pub fn keys(&self) -> &Keys {
         match self {
-            Identity::Existing(keys) | Identity::Generated(keys) | Identity::Imported(keys) => {
-                keys
-            }
+            Identity::Existing(keys) | Identity::Generated(keys) | Identity::Imported(keys) => keys,
         }
     }
 }
@@ -236,7 +234,11 @@ fn describe(relay: &str) -> Option<String> {
                 // NIP-29 is what makes a relay a Buzz community rather than a
                 // general-purpose one; saying so early avoids a puzzling
                 // empty channel list later.
-                if has(29) { "" } else { " (no nip-29 groups — channels may be empty)" }
+                if has(29) {
+                    ""
+                } else {
+                    " (no nip-29 groups — channels may be empty)"
+                }
             })
             .unwrap_or_default();
         Some(format!("{name}{nips}"))
@@ -403,8 +405,7 @@ fn read_hidden() -> Result<String> {
 
 /// Reads a key from a file, which is the safe way to script an import.
 pub fn read_key_file(path: &Path) -> Result<String> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let key = raw.trim().to_string();
     if key.is_empty() {
         bail!("{} is empty", path.display());
@@ -481,7 +482,9 @@ mod tests {
     fn nonsense_is_refused_with_something_actionable() {
         assert!(normalise_relay("").is_err());
         assert!(normalise_relay("   ").is_err());
-        let err = normalise_relay("ftp://buzz.example.com").unwrap_err().to_string();
+        let err = normalise_relay("ftp://buzz.example.com")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("wss://"), "{err}");
     }
 }

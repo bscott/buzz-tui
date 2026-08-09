@@ -170,85 +170,405 @@ struct Spec {
 
 /// Wording is lowercase throughout; mixed casing reads as a different program.
 const SPECS: &[Spec] = &[
-    spec(Action::FocusComposer, "focus_composer", Group::Navigation, "write a message"),
-    spec(Action::FocusTimeline, "focus_timeline", Group::Navigation, "browse messages"),
-    spec(Action::FocusSidebar, "focus_sidebar", Group::Navigation, "browse channels"),
-    spec(Action::CycleFocus, "cycle_focus", Group::Navigation, "next pane"),
-    spec(Action::CycleFocusBack, "cycle_focus_back", Group::Navigation, "previous pane"),
-    spec(Action::NextChannel, "next_channel", Group::Navigation, "next channel"),
-    spec(Action::PrevChannel, "previous_channel", Group::Navigation, "previous channel"),
-    spec(Action::NextUnread, "next_unread", Group::Navigation, "next unread channel"),
-    spec(Action::PrevUnread, "previous_unread", Group::Navigation, "previous unread channel"),
-    spec(Action::SelectNext, "select_next", Group::Navigation, "select next message"),
-    spec(Action::SelectPrev, "select_previous", Group::Navigation, "select previous message"),
-    spec(Action::ScrollUp, "scroll_up", Group::Navigation, "scroll up"),
-    spec(Action::ScrollDown, "scroll_down", Group::Navigation, "scroll down"),
+    spec(
+        Action::FocusComposer,
+        "focus_composer",
+        Group::Navigation,
+        "write a message",
+    ),
+    spec(
+        Action::FocusTimeline,
+        "focus_timeline",
+        Group::Navigation,
+        "browse messages",
+    ),
+    spec(
+        Action::FocusSidebar,
+        "focus_sidebar",
+        Group::Navigation,
+        "browse channels",
+    ),
+    spec(
+        Action::CycleFocus,
+        "cycle_focus",
+        Group::Navigation,
+        "next pane",
+    ),
+    spec(
+        Action::CycleFocusBack,
+        "cycle_focus_back",
+        Group::Navigation,
+        "previous pane",
+    ),
+    spec(
+        Action::NextChannel,
+        "next_channel",
+        Group::Navigation,
+        "next channel",
+    ),
+    spec(
+        Action::PrevChannel,
+        "previous_channel",
+        Group::Navigation,
+        "previous channel",
+    ),
+    spec(
+        Action::NextUnread,
+        "next_unread",
+        Group::Navigation,
+        "next unread channel",
+    ),
+    spec(
+        Action::PrevUnread,
+        "previous_unread",
+        Group::Navigation,
+        "previous unread channel",
+    ),
+    spec(
+        Action::SelectNext,
+        "select_next",
+        Group::Navigation,
+        "select next message",
+    ),
+    spec(
+        Action::SelectPrev,
+        "select_previous",
+        Group::Navigation,
+        "select previous message",
+    ),
+    spec(
+        Action::ScrollUp,
+        "scroll_up",
+        Group::Navigation,
+        "scroll up",
+    ),
+    spec(
+        Action::ScrollDown,
+        "scroll_down",
+        Group::Navigation,
+        "scroll down",
+    ),
     spec(Action::PageUp, "page_up", Group::Navigation, "page up"),
-    spec(Action::PageDown, "page_down", Group::Navigation, "page down"),
-    spec(Action::ScrollTop, "scroll_top", Group::Navigation, "jump to oldest"),
-    spec(Action::ScrollBottom, "scroll_bottom", Group::Navigation, "jump to newest"),
-    spec(Action::JumpFirstUnread, "jump_first_unread", Group::Navigation, "jump to first unread"),
-
+    spec(
+        Action::PageDown,
+        "page_down",
+        Group::Navigation,
+        "page down",
+    ),
+    spec(
+        Action::ScrollTop,
+        "scroll_top",
+        Group::Navigation,
+        "jump to oldest",
+    ),
+    spec(
+        Action::ScrollBottom,
+        "scroll_bottom",
+        Group::Navigation,
+        "jump to newest",
+    ),
+    spec(
+        Action::JumpFirstUnread,
+        "jump_first_unread",
+        Group::Navigation,
+        "jump to first unread",
+    ),
     spec(Action::Send, "send", Group::Messages, "send message"),
     spec(Action::Reply, "reply", Group::Messages, "reply in thread"),
-    spec(Action::EditMessage, "edit_message", Group::Messages, "edit message"),
-    spec(Action::DeleteMessage, "delete_message", Group::Messages, "delete message"),
+    spec(
+        Action::EditMessage,
+        "edit_message",
+        Group::Messages,
+        "edit message",
+    ),
+    spec(
+        Action::DeleteMessage,
+        "delete_message",
+        Group::Messages,
+        "delete message",
+    ),
     spec(Action::React, "react", Group::Messages, "add reaction"),
-    spec(Action::CopyMessage, "copy_message", Group::Messages, "copy message text"),
-    spec(Action::QuoteMessage, "quote_message", Group::Messages, "quote into composer"),
-    spec(Action::OpenThread, "open_thread", Group::Messages, "open thread"),
-    spec(Action::OpenLink, "open_link", Group::Messages, "open first link"),
-    spec(Action::ViewImage, "view_image", Group::Messages, "view attached image"),
-    spec(Action::RetrySend, "retry_send", Group::Messages, "resend failed message"),
-    spec(Action::DiscardFailed, "discard_failed", Group::Messages, "discard failed message"),
-
-    spec(Action::Newline, "newline", Group::Compose, "insert a line break"),
-    spec(Action::CursorLeft, "cursor_left", Group::Compose, "cursor left"),
-    spec(Action::CursorRight, "cursor_right", Group::Compose, "cursor right"),
+    spec(
+        Action::CopyMessage,
+        "copy_message",
+        Group::Messages,
+        "copy message text",
+    ),
+    spec(
+        Action::QuoteMessage,
+        "quote_message",
+        Group::Messages,
+        "quote into composer",
+    ),
+    spec(
+        Action::OpenThread,
+        "open_thread",
+        Group::Messages,
+        "open thread",
+    ),
+    spec(
+        Action::OpenLink,
+        "open_link",
+        Group::Messages,
+        "open first link",
+    ),
+    spec(
+        Action::ViewImage,
+        "view_image",
+        Group::Messages,
+        "view attached image",
+    ),
+    spec(
+        Action::RetrySend,
+        "retry_send",
+        Group::Messages,
+        "resend failed message",
+    ),
+    spec(
+        Action::DiscardFailed,
+        "discard_failed",
+        Group::Messages,
+        "discard failed message",
+    ),
+    spec(
+        Action::Newline,
+        "newline",
+        Group::Compose,
+        "insert a line break",
+    ),
+    spec(
+        Action::CursorLeft,
+        "cursor_left",
+        Group::Compose,
+        "cursor left",
+    ),
+    spec(
+        Action::CursorRight,
+        "cursor_right",
+        Group::Compose,
+        "cursor right",
+    ),
     spec(Action::CursorUp, "cursor_up", Group::Compose, "cursor up"),
-    spec(Action::CursorDown, "cursor_down", Group::Compose, "cursor down"),
-    spec(Action::WordLeft, "word_left", Group::Compose, "back one word"),
-    spec(Action::WordRight, "word_right", Group::Compose, "forward one word"),
-    spec(Action::LineStart, "line_start", Group::Compose, "start of line"),
+    spec(
+        Action::CursorDown,
+        "cursor_down",
+        Group::Compose,
+        "cursor down",
+    ),
+    spec(
+        Action::WordLeft,
+        "word_left",
+        Group::Compose,
+        "back one word",
+    ),
+    spec(
+        Action::WordRight,
+        "word_right",
+        Group::Compose,
+        "forward one word",
+    ),
+    spec(
+        Action::LineStart,
+        "line_start",
+        Group::Compose,
+        "start of line",
+    ),
     spec(Action::LineEnd, "line_end", Group::Compose, "end of line"),
-    spec(Action::DeleteBack, "delete_back", Group::Compose, "delete before cursor"),
-    spec(Action::DeleteForward, "delete_forward", Group::Compose, "delete after cursor"),
-    spec(Action::DeleteWordBack, "delete_word_back", Group::Compose, "delete word before"),
-    spec(Action::DeleteWordForward, "delete_word_forward", Group::Compose, "delete word after"),
-    spec(Action::KillToEnd, "kill_to_end", Group::Compose, "delete to end of line"),
-    spec(Action::KillToStart, "kill_to_start", Group::Compose, "delete to start of line"),
+    spec(
+        Action::DeleteBack,
+        "delete_back",
+        Group::Compose,
+        "delete before cursor",
+    ),
+    spec(
+        Action::DeleteForward,
+        "delete_forward",
+        Group::Compose,
+        "delete after cursor",
+    ),
+    spec(
+        Action::DeleteWordBack,
+        "delete_word_back",
+        Group::Compose,
+        "delete word before",
+    ),
+    spec(
+        Action::DeleteWordForward,
+        "delete_word_forward",
+        Group::Compose,
+        "delete word after",
+    ),
+    spec(
+        Action::KillToEnd,
+        "kill_to_end",
+        Group::Compose,
+        "delete to end of line",
+    ),
+    spec(
+        Action::KillToStart,
+        "kill_to_start",
+        Group::Compose,
+        "delete to start of line",
+    ),
     spec(Action::Undo, "undo", Group::Compose, "undo"),
-    spec(Action::Paste, "paste", Group::Compose, "paste from clipboard"),
-    spec(Action::HistoryPrev, "history_previous", Group::Compose, "previous sent message"),
-    spec(Action::HistoryNext, "history_next", Group::Compose, "next sent message"),
-    spec(Action::Complete, "complete", Group::Compose, "complete mention or emoji"),
-
-    spec(Action::CreateChannel, "create_channel", Group::Channels, "create a channel"),
-    spec(Action::JoinChannel, "join_channel", Group::Channels, "join a channel"),
-    spec(Action::LeaveChannel, "leave_channel", Group::Channels, "leave this channel"),
-    spec(Action::ToggleMute, "toggle_mute", Group::Channels, "mute this channel"),
-    spec(Action::TogglePin, "toggle_pin", Group::Channels, "pin this channel"),
-    spec(Action::MarkRead, "mark_read", Group::Channels, "mark channel read"),
-    spec(Action::MarkAllRead, "mark_all_read", Group::Channels, "mark everything read"),
-    spec(Action::OpenSwitcher, "switcher", Group::Channels, "jump to a channel"),
-    spec(Action::OpenSearch, "search", Group::Channels, "search messages"),
-    spec(Action::OpenMembers, "members", Group::Channels, "show members"),
-    spec(Action::OpenProfile, "profile", Group::Channels, "show author profile"),
-    spec(Action::CopyIdentity, "copy_identity", Group::Application, "copy your public key"),
-    spec(Action::OpenDirectMessage, "direct_message", Group::Channels, "start a direct message"),
-
-    spec(Action::ToggleSidebar, "toggle_sidebar", Group::View, "show or hide the sidebar"),
-    spec(Action::ToggleMemberPane, "toggle_member_pane", Group::View, "show or hide members"),
-    spec(Action::ToggleImages, "toggle_images", Group::View, "show or hide inline images"),
-    spec(Action::ToggleCompact, "toggle_compact", Group::View, "compact message spacing"),
-    spec(Action::ToggleTimestamps, "toggle_timestamps", Group::View, "show or hide timestamps"),
+    spec(
+        Action::Paste,
+        "paste",
+        Group::Compose,
+        "paste from clipboard",
+    ),
+    spec(
+        Action::HistoryPrev,
+        "history_previous",
+        Group::Compose,
+        "previous sent message",
+    ),
+    spec(
+        Action::HistoryNext,
+        "history_next",
+        Group::Compose,
+        "next sent message",
+    ),
+    spec(
+        Action::Complete,
+        "complete",
+        Group::Compose,
+        "complete mention or emoji",
+    ),
+    spec(
+        Action::CreateChannel,
+        "create_channel",
+        Group::Channels,
+        "create a channel",
+    ),
+    spec(
+        Action::JoinChannel,
+        "join_channel",
+        Group::Channels,
+        "join a channel",
+    ),
+    spec(
+        Action::LeaveChannel,
+        "leave_channel",
+        Group::Channels,
+        "leave this channel",
+    ),
+    spec(
+        Action::ToggleMute,
+        "toggle_mute",
+        Group::Channels,
+        "mute this channel",
+    ),
+    spec(
+        Action::TogglePin,
+        "toggle_pin",
+        Group::Channels,
+        "pin this channel",
+    ),
+    spec(
+        Action::MarkRead,
+        "mark_read",
+        Group::Channels,
+        "mark channel read",
+    ),
+    spec(
+        Action::MarkAllRead,
+        "mark_all_read",
+        Group::Channels,
+        "mark everything read",
+    ),
+    spec(
+        Action::OpenSwitcher,
+        "switcher",
+        Group::Channels,
+        "jump to a channel",
+    ),
+    spec(
+        Action::OpenSearch,
+        "search",
+        Group::Channels,
+        "search messages",
+    ),
+    spec(
+        Action::OpenMembers,
+        "members",
+        Group::Channels,
+        "show members",
+    ),
+    spec(
+        Action::OpenProfile,
+        "profile",
+        Group::Channels,
+        "show author profile",
+    ),
+    spec(
+        Action::CopyIdentity,
+        "copy_identity",
+        Group::Application,
+        "copy your public key",
+    ),
+    spec(
+        Action::OpenDirectMessage,
+        "direct_message",
+        Group::Channels,
+        "start a direct message",
+    ),
+    spec(
+        Action::ToggleSidebar,
+        "toggle_sidebar",
+        Group::View,
+        "show or hide the sidebar",
+    ),
+    spec(
+        Action::ToggleMemberPane,
+        "toggle_member_pane",
+        Group::View,
+        "show or hide members",
+    ),
+    spec(
+        Action::ToggleImages,
+        "toggle_images",
+        Group::View,
+        "show or hide inline images",
+    ),
+    spec(
+        Action::ToggleCompact,
+        "toggle_compact",
+        Group::View,
+        "compact message spacing",
+    ),
+    spec(
+        Action::ToggleTimestamps,
+        "toggle_timestamps",
+        Group::View,
+        "show or hide timestamps",
+    ),
     spec(Action::CycleTheme, "cycle_theme", Group::View, "next theme"),
     spec(Action::Redraw, "redraw", Group::View, "redraw the screen"),
-
-    spec(Action::OpenHelp, "help", Group::Application, "show keybindings"),
-    spec(Action::OpenCommand, "command", Group::Application, "run a command"),
-    spec(Action::ReloadConfig, "reload_config", Group::Application, "reload configuration"),
-    spec(Action::Cancel, "cancel", Group::Application, "cancel or close"),
+    spec(
+        Action::OpenHelp,
+        "help",
+        Group::Application,
+        "show keybindings",
+    ),
+    spec(
+        Action::OpenCommand,
+        "command",
+        Group::Application,
+        "run a command",
+    ),
+    spec(
+        Action::ReloadConfig,
+        "reload_config",
+        Group::Application,
+        "reload configuration",
+    ),
+    spec(
+        Action::Cancel,
+        "cancel",
+        Group::Application,
+        "cancel or close",
+    ),
     spec(Action::Quit, "quit", Group::Application, "quit buzztui"),
 ];
 
@@ -374,8 +694,8 @@ impl Chord {
             }
         }
         // Only the four modifiers a binding can name are significant.
-        self.mods &= KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT
-            | KeyModifiers::SUPER;
+        self.mods &=
+            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT | KeyModifiers::SUPER;
         self
     }
 
@@ -387,7 +707,9 @@ impl Chord {
     /// unsafe to bind directly in a scope that accepts text.
     pub fn is_printable(self) -> bool {
         matches!(self.code, KeyCode::Char(_))
-            && !self.mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+            && !self
+                .mods
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
     }
 
     pub fn parse(text: &str) -> Result<Self> {
@@ -459,12 +781,11 @@ impl Chord {
             "lbracket" => KeyCode::Char('['),
             "rbracket" => KeyCode::Char(']'),
             other => {
-                if let Some(number) = other.strip_prefix('f') {
-                    if let Ok(n) = number.parse::<u8>() {
-                        if (1..=12).contains(&n) {
-                            return Ok(Chord::new(KeyCode::F(n), mods));
-                        }
-                    }
+                if let Some(number) = other.strip_prefix('f')
+                    && let Ok(n) = number.parse::<u8>()
+                    && (1..=12).contains(&n)
+                {
+                    return Ok(Chord::new(KeyCode::F(n), mods));
                 }
                 // A bare character keeps the case the user wrote, so `K` and
                 // `shift+k` normalise to the same chord.
@@ -834,11 +1155,14 @@ impl Keymap {
                 }
                 continue;
             }
-            grouped.entry(binding.action.group()).or_default().push(HelpRow {
-                keys: binding.sequence.to_string(),
-                description: binding.action.help(),
-                action: binding.action.name(),
-            });
+            grouped
+                .entry(binding.action.group())
+                .or_default()
+                .push(HelpRow {
+                    keys: binding.sequence.to_string(),
+                    description: binding.action.help(),
+                    action: binding.action.name(),
+                });
         }
 
         for jump in jumps {
@@ -1035,7 +1359,15 @@ mod tests {
     #[test]
     fn chords_round_trip_through_their_display_form() {
         for text in [
-            "ctrl+b", "alt+enter", "shift+tab", "f5", "pgup", "space", "ctrl+alt+d", "/", "?",
+            "ctrl+b",
+            "alt+enter",
+            "shift+tab",
+            "f5",
+            "pgup",
+            "space",
+            "ctrl+alt+d",
+            "/",
+            "?",
         ] {
             let parsed = chord(text);
             assert_eq!(
@@ -1299,9 +1631,7 @@ mod tests {
             {
                 panic!(
                     "`{}` is bound to {:?} in {:?} and would make that character untypable",
-                    binding.sequence,
-                    binding.action,
-                    binding.scope
+                    binding.sequence, binding.action, binding.scope
                 );
             }
         }
@@ -1313,7 +1643,10 @@ mod tests {
         // advertise `a`, which is not the key the design intends to teach.
         let map = Keymap::builtin();
         assert_eq!(map.hint(Action::FocusComposer), "i");
-        assert!(map.keys_for(Action::FocusComposer).contains(&"a".to_string()));
+        assert!(
+            map.keys_for(Action::FocusComposer)
+                .contains(&"a".to_string())
+        );
     }
 
     /// A multi-chord binding in one mode must not turn its first key into a

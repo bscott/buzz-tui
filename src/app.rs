@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
-use nostr::event::{Event, EventBuilder, FinalizeEvent, FinalizeUnsignedEvent, Kind, Tag, UnsignedEvent};
+use nostr::event::{
+    Event, EventBuilder, FinalizeEvent, FinalizeUnsignedEvent, Kind, Tag, UnsignedEvent,
+};
 use nostr::filter::{Filter, SingleLetterTag};
 use nostr::key::{Keys, PublicKey};
 use nostr::nips::nip19::{FromBech32, ToBech32};
@@ -164,6 +166,9 @@ pub struct App {
 }
 
 impl App {
+    // Eight collaborators is what this application is made of; bundling them
+    // into a struct purely to satisfy a lint would add a type with one use.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
         paths: Paths,
@@ -352,10 +357,10 @@ impl App {
             Ok(channels) => {
                 let active = self.active.clone();
                 self.channels = channels;
-                if let Some(active) = active {
-                    if let Some(index) = self.channels.iter().position(|c| c.id == active) {
-                        self.sidebar_cursor = index;
-                    }
+                if let Some(active) = active
+                    && let Some(index) = self.channels.iter().position(|c| c.id == active)
+                {
+                    self.sidebar_cursor = index;
                 }
                 self.sidebar_cursor = self
                     .sidebar_cursor
@@ -365,10 +370,10 @@ impl App {
                 // On a cold cache the sidebar fills in only once discovery
                 // arrives, which is after startup; land the user somewhere
                 // rather than leaving them looking at an empty client.
-                if self.active.is_none() {
-                    if let Some(first) = self.channels.first().map(|c| c.id.clone()) {
-                        self.open_channel(&first);
-                    }
+                if self.active.is_none()
+                    && let Some(first) = self.channels.first().map(|c| c.id.clone())
+                {
+                    self.open_channel(&first);
                 }
             }
             Err(err) => self.error("could not read channels", err.to_string()),
@@ -587,11 +592,11 @@ impl App {
                     self.hints.clear();
                     return;
                 }
-                if self.focus == Focus::Composer {
-                    if let crossterm::event::KeyCode::Char(c) = key.code {
-                        self.composer.insert_char(c);
-                        self.note_typing();
-                    }
+                if self.focus == Focus::Composer
+                    && let crossterm::event::KeyCode::Char(c) = key.code
+                {
+                    self.composer.insert_char(c);
+                    self.note_typing();
                 }
             }
         }
@@ -824,8 +829,7 @@ impl App {
             .and_then(|id| self.channels.iter().position(|c| c.id == id))
             .unwrap_or(0);
         for hop in 1..=len {
-            let index =
-                ((start as isize + delta * hop as isize).rem_euclid(len as isize)) as usize;
+            let index = ((start as isize + delta * hop as isize).rem_euclid(len as isize)) as usize;
             let candidate = &self.channels[index];
             if !unread_only || candidate.unread > 0 {
                 let id = candidate.id.clone();
@@ -844,8 +848,7 @@ impl App {
                 return;
             }
             let len = self.channels.len() as isize;
-            self.sidebar_cursor =
-                ((self.sidebar_cursor as isize + delta).rem_euclid(len)) as usize;
+            self.sidebar_cursor = ((self.sidebar_cursor as isize + delta).rem_euclid(len)) as usize;
             let id = self.channels[self.sidebar_cursor].id.clone();
             self.open_channel(&id);
             return;
@@ -982,10 +985,10 @@ impl App {
             Ok(event) => {
                 self.composer.take();
                 // An edit is not a new message, so it must not appear as one.
-                if !matches!(mode, ComposeMode::Edit { .. }) {
-                    if let Err(err) = self.store.record_outgoing(&event, &channel) {
-                        debug!(%err, "could not record the local echo");
-                    }
+                if !matches!(mode, ComposeMode::Edit { .. })
+                    && let Err(err) = self.store.record_outgoing(&event, &channel)
+                {
+                    debug!(%err, "could not record the local echo");
                 }
                 self.relay.publish(event);
                 self.follow = true;
@@ -1021,11 +1024,9 @@ impl App {
     }
 
     fn build_edit(&self, channel: &str, target: &str, body: &str) -> Result<Event> {
-        Ok(
-            EventBuilder::new(Kind::from_u16(kinds::CHAT_EDIT), body)
-                .tags([Tag::parse(["h", channel])?, Tag::parse(["e", target])?])
-                .finalize(&self.keypair)?,
-        )
+        Ok(EventBuilder::new(Kind::from_u16(kinds::CHAT_EDIT), body)
+            .tags([Tag::parse(["h", channel])?, Tag::parse(["e", target])?])
+            .finalize(&self.keypair)?)
     }
 
     /// Sends a NIP-17 direct message, replying inside the rumor when asked.
@@ -1049,8 +1050,7 @@ impl App {
         }
         tags.extend(self.mention_tags(body));
 
-        let (mut rumor, to_peer, to_self) =
-            direct_wraps(&self.keypair, receiver, body, tags)?;
+        let (mut rumor, to_peer, to_self) = direct_wraps(&self.keypair, receiver, body, tags)?;
         let rumor_id = rumor.id().to_hex();
 
         let tags_json = serde_json::to_string(&rumor.tags)?;
@@ -1092,10 +1092,10 @@ impl App {
                 mentioned.push(pubkey.to_hex());
                 continue;
             }
-            if candidate.starts_with('@') {
-                if let Some(pubkey) = self.pubkey_for_name(bare) {
-                    mentioned.push(pubkey);
-                }
+            if candidate.starts_with('@')
+                && let Some(pubkey) = self.pubkey_for_name(bare)
+            {
+                mentioned.push(pubkey);
             }
         }
         mentioned.sort();
@@ -1273,13 +1273,12 @@ impl App {
             return;
         }
         self.last_typing = Some(now);
-        if let Ok(tag) = Tag::parse(["h", channel.as_str()]) {
-            if let Ok(event) = EventBuilder::new(Kind::from_u16(kinds::TYPING), "")
+        if let Ok(tag) = Tag::parse(["h", channel.as_str()])
+            && let Ok(event) = EventBuilder::new(Kind::from_u16(kinds::TYPING), "")
                 .tag(tag)
                 .finalize(&self.keypair)
-            {
-                self.relay.publish(event);
-            }
+        {
+            self.relay.publish(event);
         }
     }
 
@@ -1340,7 +1339,11 @@ impl App {
                 Some("paste it to whoever runs the relay".to_string()),
             ),
             // Without a clipboard, the key itself is still what they need.
-            Err(_) => self.toast(ToastKind::Info, npub, Some("copy this to be added".to_string())),
+            Err(_) => self.toast(
+                ToastKind::Info,
+                npub,
+                Some("copy this to be added".to_string()),
+            ),
         }
     }
 
@@ -1385,7 +1388,10 @@ impl App {
         let Some(message) = self.selected_message() else {
             return;
         };
-        let Some(url) = crate::ui::text::links(&message.body).first().map(|u| u.to_string()) else {
+        let Some(url) = crate::ui::text::links(&message.body)
+            .first()
+            .map(|u| u.to_string())
+        else {
             self.info("no link in this message");
             return;
         };
@@ -1436,8 +1442,11 @@ impl App {
         // Remove just the partial name; any `@` the user typed is kept.
         self.composer.apply(Action::DeleteWordBack);
         let at = self.composer.text()[..self.composer.cursor()].ends_with('@');
-        self.composer
-            .insert_str(&if at { format!("{name} ") } else { format!("@{name} ") });
+        self.composer.insert_str(&if at {
+            format!("{name} ")
+        } else {
+            format!("@{name} ")
+        });
     }
 
     // ------------------------------------------------------------- channels
@@ -1524,8 +1533,7 @@ impl App {
                 self.keymap = keymap;
                 self.diagnostics = problems;
                 if relay_changed {
-                    self.relay
-                        .send(Command::Switch(self.config.relay.clone()));
+                    self.relay.send(Command::Switch(self.config.relay.clone()));
                 }
                 self.info("configuration reloaded");
             }
@@ -1585,11 +1593,9 @@ impl App {
                     return;
                 };
                 let built = (|| -> Result<Event> {
-                    Ok(
-                        EventBuilder::new(Kind::from_u16(kinds::LEAVE_REQUEST), "")
-                            .tag(Tag::parse(["h", &channel])?)
-                            .finalize(&self.keypair)?,
-                    )
+                    Ok(EventBuilder::new(Kind::from_u16(kinds::LEAVE_REQUEST), "")
+                        .tag(Tag::parse(["h", &channel])?)
+                        .finalize(&self.keypair)?)
                 })();
                 match built {
                     Ok(event) => {
@@ -1605,14 +1611,12 @@ impl App {
 
     fn create_channel(&mut self, name: &str) {
         let built = (|| -> Result<Event> {
-            Ok(
-                EventBuilder::new(Kind::from_u16(kinds::CREATE_GROUP), "")
-                    .tags([
-                        Tag::parse(["name", name])?,
-                        Tag::parse(["visibility", "open"])?,
-                    ])
-                    .finalize(&self.keypair)?,
-            )
+            Ok(EventBuilder::new(Kind::from_u16(kinds::CREATE_GROUP), "")
+                .tags([
+                    Tag::parse(["name", name])?,
+                    Tag::parse(["visibility", "open"])?,
+                ])
+                .finalize(&self.keypair)?)
         })();
         match built {
             Ok(event) => {
@@ -1625,11 +1629,9 @@ impl App {
 
     fn join_channel(&mut self, id: &str) {
         let built = (|| -> Result<Event> {
-            Ok(
-                EventBuilder::new(Kind::from_u16(kinds::JOIN_REQUEST), "")
-                    .tag(Tag::parse(["h", id])?)
-                    .finalize(&self.keypair)?,
-            )
+            Ok(EventBuilder::new(Kind::from_u16(kinds::JOIN_REQUEST), "")
+                .tag(Tag::parse(["h", id])?)
+                .finalize(&self.keypair)?)
         })();
         match built {
             Ok(event) => {
@@ -1658,7 +1660,10 @@ impl App {
                     Err(err) => self.error("could not open the conversation", err.to_string()),
                 }
             }
-            Err(_) => self.error("not a public key", format!("`{who}` is neither npub nor hex")),
+            Err(_) => self.error(
+                "not a public key",
+                format!("`{who}` is neither npub nor hex"),
+            ),
         }
     }
 
@@ -1676,11 +1681,9 @@ impl App {
             return;
         };
         let built = (|| -> Result<Event> {
-            Ok(
-                EventBuilder::new(Kind::from_u16(kinds::EDIT_METADATA), "")
-                    .tags([Tag::parse(["h", &channel])?, Tag::parse(["topic", topic])?])
-                    .finalize(&self.keypair)?,
-            )
+            Ok(EventBuilder::new(Kind::from_u16(kinds::EDIT_METADATA), "")
+                .tags([Tag::parse(["h", &channel])?, Tag::parse(["topic", topic])?])
+                .finalize(&self.keypair)?)
         })();
         match built {
             Ok(event) => self.relay.publish(event),
@@ -1723,9 +1726,7 @@ impl App {
                     self.start_direct(rest)
                 }
             }
-            "topic" if self.active_is_direct() => {
-                self.info("direct messages have no topic")
-            }
+            "topic" if self.active_is_direct() => self.info("direct messages have no topic"),
             "invite" | "add" | "kick" | "remove" if self.active_is_direct() => {
                 self.info("direct messages have no membership")
             }
@@ -1812,7 +1813,10 @@ impl App {
             .or_else(|_| PublicKey::from_hex(who))
             .map(|key| key.to_hex());
         let Ok(target) = parsed else {
-            self.error("not a public key", format!("`{who}` is neither npub nor hex"));
+            self.error(
+                "not a public key",
+                format!("`{who}` is neither npub nor hex"),
+            );
             return;
         };
         let built = (|| -> Result<Event> {
@@ -1870,7 +1874,11 @@ impl App {
                     debug!(%err, "could not record the relay verdict");
                 }
                 if !accepted {
-                    self.toast(ToastKind::Error, "relay rejected the message", Some(message));
+                    self.toast(
+                        ToastKind::Error,
+                        "relay rejected the message",
+                        Some(message),
+                    );
                 }
                 self.reload_timeline();
             }
@@ -1891,15 +1899,15 @@ impl App {
     fn ingest(&mut self, subscription: &str, event: Event) {
         // Search results are a transient list, not part of the conversation.
         if subscription == SUB_SEARCH {
-            if let Ok(Ingested::Message { .. }) = self.store.ingest(&event) {
-                if let Some(Overlay::Search(search)) = self.overlay.as_mut() {
-                    let query = search.query.text.clone();
-                    let scope = search.scope.clone();
-                    if let Ok(results) = self.store.search(&query, scope.as_deref(), 200) {
-                        if let Some(Overlay::Search(search)) = self.overlay.as_mut() {
-                            search.set_results(results);
-                        }
-                    }
+            if let Ok(Ingested::Message { .. }) = self.store.ingest(&event)
+                && let Some(Overlay::Search(search)) = self.overlay.as_mut()
+            {
+                let query = search.query.text.clone();
+                let scope = search.scope.clone();
+                if let Ok(results) = self.store.search(&query, scope.as_deref(), 200)
+                    && let Some(Overlay::Search(search)) = self.overlay.as_mut()
+                {
+                    search.set_results(results);
                 }
             }
             return;
@@ -1979,31 +1987,31 @@ impl App {
 
         // A message from someone else in a channel we are not looking at is the
         // only thing worth interrupting for, and only if it names us.
-        if let Ingested::Message { channel, id } = &outcome {
-            if Some(channel.as_str()) != self.active.as_deref() && !self.is_me(&event.pubkey.to_hex())
-            {
-                let muted = self
+        if let Ingested::Message { channel, id } = &outcome
+            && Some(channel.as_str()) != self.active.as_deref()
+            && !self.is_me(&event.pubkey.to_hex())
+        {
+            let muted = self
+                .channels
+                .iter()
+                .find(|c| &c.id == channel)
+                .is_some_and(|c| c.muted);
+            let mentions_me = proto::tag_values(&event, "p").any(|p| p == self.me);
+            if mentions_me && !muted {
+                let name = self.display_name(&event.pubkey.to_hex());
+                let where_ = self
                     .channels
                     .iter()
                     .find(|c| &c.id == channel)
-                    .is_some_and(|c| c.muted);
-                let mentions_me = proto::tag_values(&event, "p").any(|p| p == self.me);
-                if mentions_me && !muted {
-                    let name = self.display_name(&event.pubkey.to_hex());
-                    let where_ = self
-                        .channels
-                        .iter()
-                        .find(|c| &c.id == channel)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_else(|| channel.clone());
-                    self.toast(
-                        ToastKind::Info,
-                        format!("{name} mentioned you in {where_}"),
-                        Some(crate::ui::text::truncate_end(&event.content, 60).into_owned()),
-                    );
-                }
-                let _ = id;
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| channel.clone());
+                self.toast(
+                    ToastKind::Info,
+                    format!("{name} mentioned you in {where_}"),
+                    Some(crate::ui::text::truncate_end(&event.content, 60).into_owned()),
+                );
             }
+            let _ = id;
         }
     }
 
@@ -2029,7 +2037,10 @@ impl App {
         };
         let rumor = unwrapped.rumor;
         if rumor.kind.as_u16() != kinds::PRIVATE_DM {
-            debug!(kind = rumor.kind.as_u16(), "ignoring a non-message gift wrap");
+            debug!(
+                kind = rumor.kind.as_u16(),
+                "ignoring a non-message gift wrap"
+            );
             return;
         }
         let author = rumor.pubkey.to_hex();
@@ -2120,8 +2131,8 @@ impl App {
             return;
         }
         self.last_presence = Some(now);
-        if let Ok(event) = EventBuilder::new(Kind::from_u16(kinds::PRESENCE), "online")
-            .finalize(&self.keypair)
+        if let Ok(event) =
+            EventBuilder::new(Kind::from_u16(kinds::PRESENCE), "online").finalize(&self.keypair)
         {
             self.relay.publish(event);
         }
@@ -2141,13 +2152,11 @@ impl App {
     pub fn visible_images(&self) -> HashSet<String> {
         let mut keep: HashSet<String> = self.image_urls().into_iter().collect();
         // The avatar in an open profile is not in the timeline but is on screen.
-        if self.config.ui.avatars {
-            if let Some(Overlay::Profile(pubkey)) = &self.overlay {
-                if let Some(picture) = self.profiles.get(pubkey).and_then(|p| p.picture.as_deref())
-                {
-                    keep.insert(self.config.resolve_media(picture));
-                }
-            }
+        if self.config.ui.avatars
+            && let Some(Overlay::Profile(pubkey)) = &self.overlay
+            && let Some(picture) = self.profiles.get(pubkey).and_then(|p| p.picture.as_deref())
+        {
+            keep.insert(self.config.resolve_media(picture));
         }
         if let Some(Overlay::Image(url)) = &self.overlay {
             keep.insert(url.clone());
@@ -2157,12 +2166,11 @@ impl App {
 
     pub fn shutdown(&mut self) {
         self.mark_active_read();
-        if self.config.ui.send_presence {
-            if let Ok(event) = EventBuilder::new(Kind::from_u16(kinds::PRESENCE), "offline")
+        if self.config.ui.send_presence
+            && let Ok(event) = EventBuilder::new(Kind::from_u16(kinds::PRESENCE), "offline")
                 .finalize(&self.keypair)
-            {
-                self.relay.publish(event);
-            }
+        {
+            self.relay.publish(event);
         }
         self.relay.send(Command::Shutdown);
     }
@@ -2172,8 +2180,7 @@ impl App {
 /// applied. Bad overrides degrade to the theme default and are reported rather
 /// than refusing to start.
 fn build_palette(config: &Config) -> (Palette, Vec<String>) {
-    let mut palette =
-        Palette::by_name(&config.ui.theme).unwrap_or_else(Palette::catppuccin);
+    let mut palette = Palette::by_name(&config.ui.theme).unwrap_or_else(Palette::catppuccin);
     let mut problems = Vec::new();
     if Palette::by_name(&config.ui.theme).is_none() {
         problems.push(format!(
@@ -2323,8 +2330,7 @@ mod tests {
 
         let mut tags = vec![Tag::parse(["p", &receiver.public_key().to_hex()]).unwrap()];
         tags.extend(thread_tags(&root, &root).unwrap());
-        let (_, to_peer, _) =
-            direct_wraps(&sender, receiver.public_key(), "yes", tags).unwrap();
+        let (_, to_peer, _) = direct_wraps(&sender, receiver.public_key(), "yes", tags).unwrap();
 
         assert!(
             proto::target_of(&to_peer).is_none(),
@@ -2395,6 +2401,9 @@ mod tests {
         assert_eq!(relative_time(now - 300).unwrap(), "5m ago");
         assert_eq!(relative_time(now - 7200).unwrap(), "2h ago");
         assert_eq!(relative_time(now - 172_800).unwrap(), "2d ago");
-        assert!(relative_time(0).is_none(), "a channel with no activity has no time");
+        assert!(
+            relative_time(0).is_none(),
+            "a channel with no activity has no time"
+        );
     }
 }

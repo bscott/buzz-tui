@@ -44,7 +44,8 @@ pub fn scrollbar(
     let travel = height.saturating_sub(thumb);
     // Offset counts rows scrolled up from the bottom, so invert it: the thumb
     // sits at the bottom when we are following the newest message.
-    let position = travel.saturating_sub((offset as u32 * travel as u32 / max_offset as u32) as u16);
+    let position =
+        travel.saturating_sub((offset as u32 * travel as u32 / max_offset as u32) as u16);
 
     let track_style = Style::new().fg(if focused {
         palette.overlay1
@@ -98,10 +99,7 @@ pub fn rule(frame: &mut Frame, area: Rect, palette: &Palette) {
     let line = "\u{2500}".repeat(area.width as usize);
     frame.render_widget(
         Paragraph::new(line).style(Style::new().fg(palette.surface_dim)),
-        Rect {
-            height: 1,
-            ..area
-        },
+        Rect { height: 1, ..area },
     );
 }
 
@@ -160,7 +158,14 @@ pub fn modal(
 /// The three-part empty state: what is missing, what the concept means, and the
 /// key that fixes it. The key is passed in from the live keymap so it can never
 /// document a binding the user has rebound away.
-pub fn empty_state(frame: &mut Frame, area: Rect, palette: &Palette, what: &str, why: &str, how: &[(&str, &str)]) {
+pub fn empty_state(
+    frame: &mut Frame,
+    area: Rect,
+    palette: &Palette,
+    what: &str,
+    why: &str,
+    how: &[(&str, &str)],
+) {
     if area.height < 3 || area.width < 12 {
         return;
     }
@@ -210,7 +215,10 @@ pub fn diagnostics_banner(frame: &mut Frame, area: Rect, palette: &Palette, prob
         .add_modifier(Modifier::BOLD);
     let rows = problems.len().min(area.height as usize);
     for (index, problem) in problems.iter().take(rows).enumerate() {
-        let text = format!(" {} ", text::truncate_end(problem, area.width.saturating_sub(2) as usize));
+        let text = format!(
+            " {} ",
+            text::truncate_end(problem, area.width.saturating_sub(2) as usize)
+        );
         let line = Line::from(Span::styled(text, style)).right_aligned();
         frame.render_widget(
             Paragraph::new(line),
