@@ -24,6 +24,13 @@ const UNDO_LIMIT: usize = 100;
 /// How many sent messages stay recallable.
 const HISTORY_LIMIT: usize = 200;
 
+/// Byte offset immediately after the last whitespace scalar in `text`.
+pub(crate) fn token_start(text: &str) -> usize {
+    text.char_indices()
+        .rfind(|(_, c)| c.is_whitespace())
+        .map_or(0, |(index, c)| index + c.len_utf8())
+}
+
 /// One point on the undo stack. Restoring the cursor along with the text is
 /// what makes undo feel like a rewind rather than a replace.
 #[derive(Debug, Clone)]
@@ -129,6 +136,26 @@ impl Composer {
         self.begin_edit();
         self.text.insert_str(self.cursor, text);
         self.cursor += text.len();
+    }
+
+    /// Replaces only the token under the caret with a marked completion. Text
+    /// before that token is never considered part of the edit, even when the
+    /// token currently consists of only `@` or `/`.
+    pub fn complete_token(&mut self, marker: char, value: &str) {
+        let start = token_start(&self.text[..self.cursor]);
+        let end = self.text[self.cursor..]
+            .find(char::is_whitespace)
+            .map_or(self.text.len(), |offset| self.cursor + offset);
+        let mut completed = String::with_capacity(marker.len_utf8() + value.len() + 1);
+        completed.push(marker);
+        completed.push_str(value);
+        if end == self.text.len() {
+            completed.push(' ');
+        }
+
+        self.begin_edit();
+        self.text.replace_range(start..end, &completed);
+        self.cursor = start + completed.len();
     }
 
     /// Applies an editing action. Returns false when the action is not one this
@@ -562,6 +589,29 @@ mod tests {
             assert_eq!(c.text(), after_one);
             assert_eq!(c.cursor(), after_one.len());
         }
+    }
+
+    #[test]
+    fn completion_after_a_bare_marker_preserves_the_draft() {
+        let mut c = composer("hello @");
+        c.complete_token('@', "Alice");
+        assert_eq!(c.text(), "hello @Alice ");
+        assert_eq!(c.cursor(), c.text().len());
+        let mut unicode = composer("hello\u{2003}@");
+        unicode.complete_token('@', "Alice");
+        assert_eq!(unicode.text(), "hello\u{2003}@Alice ");
+    }
+
+    #[test]
+    fn completion_replaces_only_the_partial_token() {
+        let mut c = composer("hello @ali there");
+        seek(&mut c, " there");
+        c.complete_token('@', "Alice");
+        assert_eq!(c.text(), "hello @Alice there");
+
+        let mut command = composer("/sear");
+        command.complete_token('/', "search");
+        assert_eq!(command.text(), "/search ");
     }
 
     #[test]

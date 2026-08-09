@@ -875,6 +875,41 @@ impl Store {
         Ok(messages)
     }
 
+    /// Loads the page ending at `id`, oldest first. Search uses this instead of
+    /// the newest page so selecting an old result always puts that exact event
+    /// on screen.
+    pub fn messages_through(&self, channel: &str, id: &str, limit: u32) -> Result<Vec<Message>> {
+        let conn = self.lock();
+        let created_at = conn
+            .query_row(
+                "SELECT created_at FROM events
+                 WHERE id = ?1 AND channel = ?2 AND kind IN (9, 40002)",
+                params![id, channel],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(created_at) = created_at else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = conn.prepare(
+            "SELECT id, channel, pubkey, created_at, kind, content, edit_body,
+                    edited_at, deleted, parent, root, delivery, error
+             FROM events
+             WHERE channel = ?1 AND kind IN (9, 40002)
+               AND (created_at < ?3 OR (created_at = ?3 AND id <= ?2))
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?4",
+        )?;
+        let mut messages = stmt
+            .query_map(params![channel, id, created_at, limit], message_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        messages.reverse();
+        drop(stmt);
+        drop(conn);
+        self.attach_reactions(&mut messages)?;
+        Ok(messages)
+    }
+
     /// Fetches a single message by id, used to render the quoted parent of a
     /// reply whose parent may have scrolled out of the loaded page.
     pub fn message(&self, id: &str) -> Result<Option<Message>> {
@@ -1420,6 +1455,39 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].body, "first");
         assert_eq!(messages[2].body, "third");
+    }
+
+    #[test]
+    fn a_message_page_can_end_at_an_old_search_result() {
+        let keys = Keys::generate();
+        let store = store_with(&keys);
+        let mut events = Vec::new();
+        for (offset, body) in ["first", "second", "target", "fourth", "fifth"]
+            .iter()
+            .enumerate()
+        {
+            let event = chat_at(&keys, "room", body, 1_700_000_000 + offset as u64);
+            store.ingest(&event).unwrap();
+            events.push(event);
+        }
+
+        let messages = store
+            .messages_through("room", &events[2].id.to_hex(), 2)
+            .unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second", "target"]
+        );
+        assert!(
+            store
+                .messages_through("another-room", &events[2].id.to_hex(), 2)
+                .unwrap()
+                .is_empty(),
+            "a result must not cross its channel boundary"
+        );
     }
 
     #[test]

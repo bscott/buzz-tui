@@ -190,12 +190,18 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App, hint: Option<Line<'st
     let current = env!("CARGO_PKG_VERSION");
     let (label, style) = match &app.update {
         UpdateStatus::Checking => (format!("v{current}  checking updates "), palette.dim()),
-        UpdateStatus::Current | UpdateStatus::Unavailable => {
-            (format!("v{current} "), palette.pending())
-        }
+        UpdateStatus::Current => (format!("v{current}  current \u{2713} "), palette.success()),
+        UpdateStatus::Unavailable => (format!("v{current}  updates ? "), palette.warn()),
         UpdateStatus::Available(latest) => (
             format!("update v{latest} available \u{2191} "),
             palette.warn(),
+        ),
+        UpdateStatus::Installing(latest) => {
+            (format!("installing v{latest} \u{25d0} "), palette.warn())
+        }
+        UpdateStatus::Installed(latest) => (
+            format!("v{latest} installed \u{00b7} restart "),
+            palette.success(),
         ),
     };
     frame.render_widget(

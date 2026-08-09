@@ -15,7 +15,7 @@ mod ui;
 mod update;
 
 use std::io::{IsTerminal, stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -392,6 +392,9 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
 
 async fn run(config: Config, paths: Paths) -> Result<()> {
     init_logging(&paths);
+    // Linux reports `/proc/self/exe` with a ` (deleted)` suffix after an atomic
+    // self-update. Keep the launch path while the original inode still exists.
+    let executable = std::env::current_exe().context("locating the running executable")?;
 
     let (keypair, generated) = load_or_create_identity(&paths)?;
     let me = keypair.public_key().to_hex();
@@ -411,7 +414,7 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
     diagnostics.extend(keymap.diagnostics.iter().cloned());
 
     let (relay, mut relay_updates) = net::spawn(relay_url.clone(), keypair.clone());
-    let mut update_rx = update::spawn();
+    let mut update_rx = update::spawn(update::Request::Check);
     let (media_tx, mut media_rx) = mpsc::unbounded_channel::<MediaEvent>();
 
     let mut terminal = ratatui::try_init().context("could not take over the terminal")?;
@@ -456,6 +459,7 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
         &mut update_rx,
     )
     .await;
+    let restart = app.take_restart_request();
 
     app.shutdown();
     // Give the relay task a moment to flush the offline presence event.
@@ -463,7 +467,12 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
 
     let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
-    result
+    if restart {
+        result?;
+        restart_process(&executable)
+    } else {
+        result
+    }
 }
 
 async fn event_loop(
@@ -471,7 +480,7 @@ async fn event_loop(
     app: &mut App,
     relay_updates: &mut mpsc::UnboundedReceiver<net::Update>,
     media_rx: &mut mpsc::UnboundedReceiver<MediaEvent>,
-    update_rx: &mut mpsc::UnboundedReceiver<update::Status>,
+    update_rx: &mut mpsc::UnboundedReceiver<update::Event>,
 ) -> Result<()> {
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
@@ -479,6 +488,10 @@ async fn event_loop(
     let mut update_done = false;
 
     while app.running {
+        if let Some(request) = app.take_update_request() {
+            *update_rx = update::spawn(request);
+            update_done = false;
+        }
         if app.dirty {
             terminal.draw(|frame| ui::render(frame, app))?;
             app.dirty = false;
@@ -515,16 +528,35 @@ async fn event_loop(
                     app.on_media(event);
                 }
             }
-            status = update_rx.recv(), if !update_done => {
+            event = update_rx.recv(), if !update_done => {
                 update_done = true;
-                if let Some(status) = status {
-                    app.on_update(status);
+                if let Some(event) = event {
+                    app.on_update(event);
                 }
             }
             _ = tick.tick() => app.on_tick(),
         }
     }
     Ok(())
+}
+
+fn restart_command(executable: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
+    command.args(std::env::args_os().skip(1));
+    command
+}
+
+#[cfg(unix)]
+fn restart_process(executable: &Path) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let error = restart_command(executable).exec();
+    bail!("could not restart buzztui: {error}")
+}
+
+#[cfg(not(unix))]
+fn restart_process(_executable: &Path) -> Result<()> {
+    bail!("automatic restart is unavailable on this platform")
 }
 
 /// Logs go to a file, because anything written to the terminal would be painted
@@ -545,4 +577,30 @@ fn init_logging(paths: &Paths) {
         .with_writer(file)
         .with_ansi(false)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_uses_the_path_captured_before_atomic_replacement() {
+        let dir = std::env::temp_dir().join(format!("buzztui-restart-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("buzztui");
+        std::fs::write(&executable, b"old executable").unwrap();
+
+        let captured = executable.clone();
+        let replacement = dir.join(".buzztui.update");
+        std::fs::write(&replacement, b"new executable").unwrap();
+        std::fs::rename(replacement, &executable).unwrap();
+
+        let command = restart_command(&captured);
+        let program = Path::new(command.get_program());
+        assert_eq!(program, captured);
+        assert_eq!(std::fs::read(program).unwrap(), b"new executable");
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

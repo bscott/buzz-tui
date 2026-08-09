@@ -19,9 +19,10 @@ use nostr::key::{Keys, PublicKey};
 use nostr::nips::nip19::{FromBech32, ToBech32};
 use nostr::nips::nip59::{GiftWrapBuilder, UnwrappedGift};
 use nostr::types::Timestamp;
+use semver::Version;
 use tracing::{debug, warn};
 
-use crate::composer::Composer;
+use crate::composer::{Composer, token_start};
 use crate::config::{Community, Config, Paths};
 use crate::keys::{Action, Chord, Keymap, Resolution, Scope};
 use crate::media::{Media, MediaEvent};
@@ -34,7 +35,7 @@ use crate::overlay::{
 use crate::proto::{self, kinds};
 use crate::store::{self, Ingested, Store};
 use crate::ui::theme::Palette;
-use crate::update::Status as UpdateStatus;
+use crate::update::{Event as UpdateEvent, Request as UpdateRequest, Status as UpdateStatus};
 
 /// Subscription ids. Fixed strings keep reconnect replay simple.
 const SUB_DISCOVERY: &str = "discovery";
@@ -51,6 +52,121 @@ const TYPING_TTL: Duration = Duration::from_secs(6);
 const PRESENCE_INTERVAL: Duration = Duration::from_secs(60);
 /// Minimum gap between typing indicators, so a fast typist does not flood.
 const TYPING_INTERVAL: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Clone, Copy)]
+struct SlashCommand {
+    name: &'static str,
+    args: &'static str,
+    help: &'static str,
+}
+
+const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "join",
+        args: "<channel>",
+        help: "join a channel",
+    },
+    SlashCommand {
+        name: "create",
+        args: "<name>",
+        help: "create a channel",
+    },
+    SlashCommand {
+        name: "leave",
+        args: "",
+        help: "leave this channel",
+    },
+    SlashCommand {
+        name: "dm",
+        args: "<npub>",
+        help: "open a direct message",
+    },
+    SlashCommand {
+        name: "invite",
+        args: "<npub>",
+        help: "add a channel member",
+    },
+    SlashCommand {
+        name: "kick",
+        args: "<npub>",
+        help: "remove a channel member",
+    },
+    SlashCommand {
+        name: "topic",
+        args: "[text]",
+        help: "set the channel topic",
+    },
+    SlashCommand {
+        name: "community",
+        args: "[list|use|add]",
+        help: "switch or add a community",
+    },
+    SlashCommand {
+        name: "relay",
+        args: "[url]",
+        help: "change the relay",
+    },
+    SlashCommand {
+        name: "search",
+        args: "[query]",
+        help: "search messages",
+    },
+    SlashCommand {
+        name: "theme",
+        args: "[name]",
+        help: "change the color theme",
+    },
+    SlashCommand {
+        name: "mute",
+        args: "",
+        help: "toggle channel notifications",
+    },
+    SlashCommand {
+        name: "pin",
+        args: "",
+        help: "toggle the channel pin",
+    },
+    SlashCommand {
+        name: "read",
+        args: "",
+        help: "mark this channel read",
+    },
+    SlashCommand {
+        name: "me",
+        args: "<action>",
+        help: "send an emote",
+    },
+    SlashCommand {
+        name: "whoami",
+        args: "",
+        help: "show your public key",
+    },
+    SlashCommand {
+        name: "reload",
+        args: "",
+        help: "reload configuration",
+    },
+    SlashCommand {
+        name: "update",
+        args: "[install]",
+        help: "check for or install an update",
+    },
+    SlashCommand {
+        name: "help",
+        args: "",
+        help: "show keybindings",
+    },
+    SlashCommand {
+        name: "keys",
+        args: "",
+        help: "show keybindings",
+    },
+    SlashCommand {
+        name: "quit",
+        args: "",
+        help: "quit buzztui",
+    },
+];
 
 /// Which pane owns the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +282,9 @@ pub struct App {
     pub diagnostics: Vec<String>,
     pub conn: ConnState,
     pub update: UpdateStatus,
+    update_request: Option<UpdateRequest>,
+    restart_requested: bool,
+    announce_update_result: bool,
 
     pub show_sidebar: bool,
     pub show_members: bool,
@@ -175,6 +294,16 @@ pub struct App {
     pub mouse: bool,
     /// Set when something changed and the screen needs repainting.
     pub dirty: bool,
+}
+
+/// An install owns the one-shot update channel until its result arrives. A
+/// second check must not detach that result or erase the restart state.
+fn update_check_transition(status: &UpdateStatus) -> Option<(UpdateStatus, UpdateRequest)> {
+    (!matches!(
+        status,
+        UpdateStatus::Installing(_) | UpdateStatus::Installed(_)
+    ))
+    .then_some((UpdateStatus::Checking, UpdateRequest::Check))
 }
 
 impl App {
@@ -239,6 +368,9 @@ impl App {
             diagnostics,
             conn: ConnState::Offline,
             update: UpdateStatus::Checking,
+            update_request: None,
+            restart_requested: false,
+            announce_update_result: false,
             show_sidebar: true,
             show_members: false,
             show_images,
@@ -565,19 +697,101 @@ impl App {
         names
     }
 
-    /// Records the advisory release check. Only a newer release interrupts the
-    /// conversation; failures remain visible to diagnostics without pretending
-    /// the relay or cache are unhealthy.
-    pub fn on_update(&mut self, status: UpdateStatus) {
-        if let UpdateStatus::Available(latest) = &status {
-            self.toast(
-                ToastKind::Info,
-                format!("buzztui {latest} is available"),
-                Some("https://github.com/bscott/buzz-tui/releases/latest".to_string()),
-            );
+    /// Records the result of an asynchronous release check or installation.
+    pub fn on_update(&mut self, event: UpdateEvent) {
+        match event {
+            UpdateEvent::Checked(status) => {
+                match &status {
+                    UpdateStatus::Available(latest) => self.toast(
+                        ToastKind::Info,
+                        format!("buzztui {latest} is available"),
+                        Some("run /update install to download and verify it".to_string()),
+                    ),
+                    UpdateStatus::Current if self.announce_update_result => self.toast(
+                        ToastKind::Success,
+                        format!("buzztui v{} is current", env!("CARGO_PKG_VERSION")),
+                        None,
+                    ),
+                    UpdateStatus::Unavailable if self.announce_update_result => self.toast(
+                        ToastKind::Warn,
+                        "update check unavailable",
+                        Some("try /update again or visit the GitHub releases page".to_string()),
+                    ),
+                    _ => {}
+                }
+                self.announce_update_result = false;
+                self.update = status;
+            }
+            UpdateEvent::Installed(version) => {
+                self.update = UpdateStatus::Installed(version.clone());
+                self.toast(
+                    ToastKind::Success,
+                    format!("buzztui v{version} installed"),
+                    Some("restart to run the new executable".to_string()),
+                );
+                self.overlay = Some(Overlay::Confirm(Confirm::new(Confirmation::RestartUpdate(
+                    version,
+                ))));
+            }
+            UpdateEvent::InstallFailed { version, error } => {
+                self.update = UpdateStatus::Available(version);
+                self.error("update failed", error);
+            }
         }
-        self.update = status;
         self.dirty = true;
+    }
+
+    fn request_update_check(&mut self) {
+        let Some((status, request)) = update_check_transition(&self.update) else {
+            match &self.update {
+                UpdateStatus::Installing(version) => {
+                    self.info(format!("buzztui v{version} is already downloading"));
+                }
+                UpdateStatus::Installed(_) => self.info("restart to finish the installed update"),
+                _ => unreachable!("only active or installed updates block checks"),
+            }
+            return;
+        };
+        self.update = status;
+        self.update_request = Some(request);
+        self.announce_update_result = true;
+        self.info("checking for updates");
+    }
+
+    fn request_update_install(&mut self) {
+        match self.update.clone() {
+            UpdateStatus::Available(version) => {
+                self.overlay = Some(Overlay::Confirm(Confirm::new(Confirmation::InstallUpdate(
+                    version,
+                ))));
+            }
+            UpdateStatus::Installing(version) => {
+                self.info(format!("buzztui v{version} is already downloading"));
+            }
+            UpdateStatus::Installed(version) => {
+                self.overlay = Some(Overlay::Confirm(Confirm::new(Confirmation::RestartUpdate(
+                    version,
+                ))));
+            }
+            UpdateStatus::Checking => self.info("wait for the update check to finish"),
+            UpdateStatus::Current => self.info("no newer release is available"),
+            UpdateStatus::Unavailable => self.info("run /update to check again first"),
+        }
+    }
+
+    fn begin_update_install(&mut self, version: Version) {
+        self.update = UpdateStatus::Installing(version.clone());
+        self.update_request = Some(UpdateRequest::Install(version.clone()));
+        self.info(format!("downloading and verifying buzztui v{version}"));
+    }
+
+    /// Lets the async event loop replace a completed update task on demand.
+    pub fn take_update_request(&mut self) -> Option<UpdateRequest> {
+        self.update_request.take()
+    }
+
+    pub fn take_restart_request(&mut self) -> bool {
+        std::mem::take(&mut self.restart_requested)
     }
 
     // ------------------------------------------------------------ toasting
@@ -659,8 +873,17 @@ impl App {
                 if self.focus == Focus::Composer
                     && let crossterm::event::KeyCode::Char(c) = key.code
                 {
+                    let cursor = self.composer.cursor();
+                    let before = &self.composer.text()[..cursor];
+                    let token_start = before.chars().next_back().is_none_or(char::is_whitespace);
+                    let command_start = c == '/' && before.trim().is_empty();
                     self.composer.insert_char(c);
                     self.note_typing();
+                    if c == '@' && token_start {
+                        self.open_mention_picker();
+                    } else if command_start {
+                        self.open_command_picker();
+                    }
                 }
             }
         }
@@ -880,6 +1103,7 @@ impl App {
             Action::OpenCommand => {
                 self.focus = Focus::Composer;
                 self.composer.set_text("/");
+                self.open_command_picker();
             }
             Action::ReloadConfig => self.reload_config(),
 
@@ -1276,13 +1500,17 @@ impl App {
             .collect()
     }
 
-    /// The roster member whose display name matches, case-insensitively.
+    /// The roster member whose display name or composer-safe mention token
+    /// matches, case-insensitively.
     fn pubkey_for_name(&self, name: &str) -> Option<String> {
         let needle = name.to_lowercase();
         self.members
             .iter()
             .map(|(pubkey, _)| pubkey)
-            .find(|pubkey| self.display_name(pubkey).to_lowercase() == needle)
+            .find(|pubkey| {
+                let display = self.display_name(pubkey);
+                display.to_lowercase() == needle || mention_token(&display).to_lowercase() == needle
+            })
             .cloned()
     }
 
@@ -1601,36 +1829,71 @@ impl App {
         self.overlay = Some(Overlay::Image(url));
     }
 
-    /// Completes the token under the cursor against the member list. Editing
-    /// through the composer's own primitives rather than rewriting the whole
-    /// body is what keeps the cursor correct when completing mid-message.
+    fn mention_picker(&self, query: &str) -> Picker {
+        let mut items: Vec<PickerItem> = self
+            .members
+            .iter()
+            .map(|(pubkey, role)| {
+                let name = self.display_name(pubkey);
+                PickerItem {
+                    id: pubkey.clone(),
+                    label: format!("@{}  {name}", mention_token(&name)),
+                    detail: Some(format!(
+                        "{} \u{00b7} {}",
+                        role.as_str(),
+                        proto::short_pubkey(pubkey)
+                    )),
+                    badge: self
+                        .presence
+                        .get(pubkey)
+                        .map(|presence| presence.dot().to_string()),
+                }
+            })
+            .collect();
+        items.sort_by_key(|item| item.label.to_lowercase());
+        Picker::new(PickerKind::Mention, "mention a member", items).with_query(query)
+    }
+
+    fn open_mention_picker(&mut self) {
+        self.overlay = Some(Overlay::Picker(self.mention_picker("")));
+    }
+
+    fn open_command_picker(&mut self) {
+        let items = SLASH_COMMANDS
+            .iter()
+            .map(|command| PickerItem {
+                id: command.name.to_string(),
+                label: format!("/{:<11} {}", command.name, command.args),
+                detail: Some(command.help.to_string()),
+                badge: None,
+            })
+            .collect();
+        self.overlay = Some(Overlay::Picker(Picker::new(
+            PickerKind::Command,
+            "run a command",
+            items,
+        )));
+    }
+
+    fn insert_mention(&mut self, pubkey: &str) {
+        let name = self.display_name(pubkey);
+        self.composer.complete_token('@', &mention_token(&name));
+        self.focus = Focus::Composer;
+        self.note_typing();
+    }
+
+    fn insert_command(&mut self, command: &str) {
+        self.composer.complete_token('/', command);
+        self.focus = Focus::Composer;
+    }
+
+    /// Reopens the fuzzy member picker with the partial token already typed.
     fn complete_mention(&mut self) {
         let text = self.composer.text();
         let head = &text[..self.composer.cursor()];
-        let start = head.rfind(char::is_whitespace).map_or(0, |i| i + 1);
-        let prefix = head[start..].trim_start_matches('@').to_lowercase();
-        if prefix.is_empty() {
-            return;
-        }
-
-        let matched = self
-            .members
-            .iter()
-            .map(|(pubkey, _)| self.display_name(pubkey))
-            .find(|name| name.to_lowercase().starts_with(&prefix));
-        let Some(name) = matched else {
-            self.info("no matching member");
-            return;
-        };
-
-        // Remove just the partial name; any `@` the user typed is kept.
-        self.composer.apply(Action::DeleteWordBack);
-        let at = self.composer.text()[..self.composer.cursor()].ends_with('@');
-        self.composer.insert_str(&if at {
-            format!("{name} ")
-        } else {
-            format!("@{name} ")
-        });
+        let start = token_start(head);
+        let query = head[start..].trim_start_matches('@');
+        self.overlay = Some(Overlay::Picker(self.mention_picker(query)));
     }
 
     // ------------------------------------------------------------- channels
@@ -1774,17 +2037,37 @@ impl App {
             Submission::OpenChannel(id) => self.open_channel(&id),
             Submission::SwitchCommunity(name) => self.switch_community(&name),
             Submission::React(emoji) => self.react(&emoji),
-            Submission::JumpToMessage { channel, id } => {
-                self.open_channel(&channel);
-                if let Some(index) = self.timeline.iter().position(|m| m.id == id) {
-                    self.selected = Some(index);
-                    self.follow = false;
-                } else {
-                    self.info("message is older than the loaded history");
-                }
-            }
+            Submission::JumpToMessage { channel, id } => self.jump_to_message(&channel, &id),
+            Submission::InsertMention(pubkey) => self.insert_mention(&pubkey),
+            Submission::InsertCommand(command) => self.insert_command(&command),
             Submission::Prompt { kind, value } => self.run_prompt(kind, &value),
             Submission::Confirmed(action) => self.run_confirmed(action),
+        }
+    }
+
+    fn jump_to_message(&mut self, channel: &str, id: &str) {
+        self.open_channel(channel);
+        match self
+            .store
+            .messages_through(channel, id, self.config.ui.backfill as u32)
+        {
+            Ok(messages) => {
+                let Some(index) = messages.iter().position(|message| message.id == id) else {
+                    self.info("search result is no longer in the local cache");
+                    return;
+                };
+                self.timeline = messages;
+                self.selected = Some(index);
+                self.scroll = 0;
+                self.follow = false;
+                self.focus = Focus::Timeline;
+                self.thread_root = None;
+                self.thread_selected = None;
+                self.load_parents();
+                self.request_profiles();
+                self.dirty = true;
+            }
+            Err(err) => self.error("could not open search result", err.to_string()),
         }
     }
 
@@ -1801,6 +2084,11 @@ impl App {
     fn run_confirmed(&mut self, action: Confirmation) {
         match action {
             Confirmation::Quit => self.running = false,
+            Confirmation::InstallUpdate(version) => self.begin_update_install(version),
+            Confirmation::RestartUpdate(_) => {
+                self.restart_requested = true;
+                self.running = false;
+            }
             Confirmation::DeleteMessage(id) => {
                 let Some(channel) = self.active.clone() else {
                     return;
@@ -2136,10 +2424,15 @@ impl App {
                 self.toast(ToastKind::Info, "your public key", Some(npub));
             }
             "reload" => self.dispatch(Action::ReloadConfig),
+            "update" if rest.is_empty() || rest.eq_ignore_ascii_case("check") => {
+                self.request_update_check()
+            }
+            "update" if rest.eq_ignore_ascii_case("install") => self.request_update_install(),
+            "update" => self.error("invalid update command", "usage: /update [install]"),
             "" => {}
             other => self.error(
                 format!("unknown command /{other}"),
-                "type /help for the keybinding reference".to_string(),
+                "type / to browse commands".to_string(),
             ),
         }
     }
@@ -2544,6 +2837,17 @@ fn build_palette(config: &Config) -> (Palette, Vec<String>) {
     (palette, problems)
 }
 
+/// Turns a display name into one composer token while retaining Unicode names.
+/// Whitespace becomes `_`; punctuation the mention parser treats as prose is
+/// excluded so the generated `p` tag can always be resolved on send.
+fn mention_token(name: &str) -> String {
+    name.split_whitespace()
+        .map(|part| part.trim_matches(['@', ',', '.', ':', ';', '!', '?']))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 /// A short, human relative time for the channel switcher. Precision past a day
 /// is noise when you are only deciding which room to open.
 fn relative_time(when: i64) -> Option<String> {
@@ -2806,6 +3110,43 @@ mod tests {
         assert!(
             relative_time(0).is_none(),
             "a channel with no activity has no time"
+        );
+    }
+
+    #[test]
+    fn mention_tokens_are_single_resolvable_words() {
+        assert_eq!(mention_token("Alice Smith"), "Alice_Smith");
+        assert_eq!(
+            mention_token(" Jos\u{00e9} van Dyke! "),
+            "Jos\u{00e9}_van_Dyke"
+        );
+        assert_eq!(mention_token("@operator,"), "operator");
+    }
+
+    #[test]
+    fn the_command_picker_exposes_the_documented_command_set() {
+        let names: Vec<&str> = SLASH_COMMANDS.iter().map(|command| command.name).collect();
+        let unique: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique.len(), "command names must be unique");
+        assert!(names.contains(&"update"));
+        assert!(names.contains(&"community"));
+        assert!(names.contains(&"invite"));
+    }
+
+    #[test]
+    fn update_checks_cannot_detach_an_install_result() {
+        let version = Version::new(1, 2, 3);
+        assert_eq!(
+            update_check_transition(&UpdateStatus::Installing(version.clone())),
+            None
+        );
+        assert_eq!(
+            update_check_transition(&UpdateStatus::Installed(version.clone())),
+            None
+        );
+        assert_eq!(
+            update_check_transition(&UpdateStatus::Available(version)),
+            Some((UpdateStatus::Checking, UpdateRequest::Check))
         );
     }
 }

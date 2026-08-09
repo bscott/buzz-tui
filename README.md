@@ -251,9 +251,21 @@ Typed into the composer, for the things that need an argument. `/community`
 opens the switcher; `/community add <name> <relay> [gateway]` saves and opens
 another community; `/community use <name>` switches directly.
 
+Typing `/` at the start of the composer opens the complete fuzzy command list.
+Type to filter it, then press `enter` to insert the selected command. Typing `@`
+at a word boundary does the same for the current channel roster; the selected
+name is inserted and the outgoing message carries its Nostr `p` tag.
+
+`/update` reruns the release check. Its result remains in the footer: `current`,
+`updates ?` when GitHub could not be reached, or the newer release number.
+When one is available, `/update install` asks before downloading the matching
+release archive and `SHA256SUMS`. The archive is verified, only its expected
+binary is read, and the executable is atomically replaced before buzztui offers
+to restart. A read-only installation fails without changing the running binary.
+
 `/join` `/create` `/leave` `/dm` `/invite` `/kick` `/topic` `/community`
 `/relay` `/search` `/theme` `/mute` `/pin` `/read` `/me` `/whoami` `/reload`
-`/keys` `/quit`
+`/update` `/help` `/keys` `/quit`
 
 ## Direct messages
 
@@ -297,7 +309,7 @@ drawn at. Set it to your font's real cell size if pictures look stretched.
 ## Development
 
 ```bash
-cargo test          # 158 tests, no network
+cargo test          # 188 tests, no network
 cargo clippy --all-targets -- -D warnings
 cargo run -- doctor
 ```

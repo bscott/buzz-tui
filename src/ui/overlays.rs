@@ -116,14 +116,9 @@ fn render_picker(frame: &mut Frame, app: &App, picker: &Picker) {
     let screen = frame.area();
     let width = 62.min(screen.width.saturating_sub(4));
     let height = (picker.filtered.len() as u16 + 5).clamp(8, 22.min(screen.height));
-    let Some(area) = widgets::modal(
-        frame,
-        palette,
-        &picker.title,
-        width,
-        height,
-        Some("enter to open \u{00b7} esc to close"),
-    ) else {
+    let hint = format!("enter to {} \u{00b7} esc to close", picker.accept_hint());
+    let Some(area) = widgets::modal(frame, palette, &picker.title, width, height, Some(&hint))
+    else {
         return;
     };
 

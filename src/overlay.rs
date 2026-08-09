@@ -9,7 +9,9 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use semver::Version;
 
+use crate::composer::token_start;
 use crate::keys::{Group, Keymap};
 use crate::model::Message;
 
@@ -33,6 +35,8 @@ pub enum Submission {
     SwitchCommunity(String),
     React(String),
     JumpToMessage { channel: String, id: String },
+    InsertMention(String),
+    InsertCommand(String),
     Prompt { kind: PromptKind, value: String },
     Confirmed(Confirmation),
 }
@@ -74,6 +78,8 @@ impl PromptKind {
 pub enum Confirmation {
     DeleteMessage(String),
     LeaveChannel(String),
+    InstallUpdate(Version),
+    RestartUpdate(Version),
     Quit,
 }
 
@@ -82,6 +88,10 @@ impl Confirmation {
         match self {
             Confirmation::DeleteMessage(_) => "delete this message?".to_string(),
             Confirmation::LeaveChannel(name) => format!("leave {name}?"),
+            Confirmation::InstallUpdate(version) => format!("install buzztui v{version}?"),
+            Confirmation::RestartUpdate(version) => {
+                format!("restart into buzztui v{version} now?")
+            }
             Confirmation::Quit => "quit buzztui?".to_string(),
         }
     }
@@ -92,6 +102,10 @@ impl Confirmation {
                 "a deletion request is published; relays and other clients may keep copies"
             }
             Confirmation::LeaveChannel(_) => "you can rejoin an open channel at any time",
+            Confirmation::InstallUpdate(_) => {
+                "the matching GitHub archive is checksum-verified before replacing this executable"
+            }
+            Confirmation::RestartUpdate(_) => "the terminal session and relay connection restart",
             Confirmation::Quit => "unsent drafts are discarded",
         }
     }
@@ -162,7 +176,7 @@ impl Query {
             }
             (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
                 let trimmed = self.text.trim_end();
-                let cut = trimmed.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+                let cut = token_start(trimmed);
                 self.text.truncate(cut);
                 true
             }
@@ -226,6 +240,8 @@ pub enum PickerKind {
     Channel,
     Community,
     Emoji,
+    Mention,
+    Command,
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +293,12 @@ impl Picker {
         }
     }
 
+    pub fn with_query(mut self, query: impl Into<String>) -> Self {
+        self.query.text = query.into();
+        self.refilter();
+        self
+    }
+
     /// The reaction picker, seeded with the emoji people actually reach for.
     pub fn emoji() -> Self {
         let items = EMOJI
@@ -289,6 +311,14 @@ impl Picker {
             })
             .collect();
         Picker::new(PickerKind::Emoji, "add reaction", items)
+    }
+
+    pub fn accept_hint(&self) -> &'static str {
+        match self.kind {
+            PickerKind::Channel | PickerKind::Community => "open",
+            PickerKind::Emoji => "react",
+            PickerKind::Mention | PickerKind::Command => "insert",
+        }
     }
 
     pub fn selection(&self) -> Option<&PickerItem> {
@@ -312,6 +342,8 @@ impl Picker {
                         PickerKind::Channel => Submission::OpenChannel(item.id.clone()),
                         PickerKind::Community => Submission::SwitchCommunity(item.id.clone()),
                         PickerKind::Emoji => Submission::React(item.id.clone()),
+                        PickerKind::Mention => Submission::InsertMention(item.id.clone()),
+                        PickerKind::Command => Submission::InsertCommand(item.id.clone()),
                     }),
                     // Submitting an empty list would silently do nothing, which
                     // reads as a broken key; closing is honest.
@@ -767,6 +799,34 @@ mod tests {
         assert_eq!(
             picker.handle(key(KeyCode::Enter)),
             Outcome::Submit(Submission::React("\u{1f44d}".into()))
+        );
+    }
+
+    #[test]
+    fn completion_pickers_submit_the_value_the_composer_needs() {
+        let item = PickerItem {
+            id: "alice-pubkey".into(),
+            label: "@Alice_Smith  Alice Smith".into(),
+            detail: Some("member".into()),
+            badge: None,
+        };
+        let mut mention = Picker::new(PickerKind::Mention, "mention", vec![item]).with_query("asm");
+        assert_eq!(
+            mention.handle(key(KeyCode::Enter)),
+            Outcome::Submit(Submission::InsertMention("alice-pubkey".into()))
+        );
+
+        let item = PickerItem {
+            id: "search".into(),
+            label: "/search [query]".into(),
+            detail: Some("search messages".into()),
+            badge: None,
+        };
+        let mut command =
+            Picker::new(PickerKind::Command, "command", vec![item]).with_query("srch");
+        assert_eq!(
+            command.handle(key(KeyCode::Enter)),
+            Outcome::Submit(Submission::InsertCommand("search".into()))
         );
     }
 
