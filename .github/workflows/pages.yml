@@ -1,0 +1,70 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+    # The site is generated from the program: its version comes from Cargo.toml
+    # and its keybinding table from `buzztui keys`. Narrowing this to `web/**`
+    # would let the published page fall behind the code it documents, which is
+    # the exact failure generating it was meant to prevent.
+    paths:
+      - "web/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/pages.yml"
+  # A release changes what the install section should say, and tags do not
+  # touch the paths above.
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Deployments are not additive; the newest one is the only one that matters.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The generator runs the binary to read the live keymap, so it has to
+      # exist. Release profile keeps the page build honest about what ships.
+      - name: build buzztui
+        run: cargo build --release --locked
+
+      - name: render the site
+        run: |
+          python3 web/build.py \
+            --binary target/release/buzztui \
+            --out site \
+            --repo "${{ github.repository }}" \
+            --domain "${{ vars.PAGES_DOMAIN }}"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    # Only this job may publish, and it needs no access to the repository
+    # contents to do it.
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,25 @@
+ channels  3             │ # engineering  ·  where the work happens      ● online  127.0.0.1:7447
+ # design             1  │
+ # releases           2  │
+ # engineering           │
+                         │
+                         │   today ──────────────────────────────────────────────────────────────
+                         │
+                         │  alice  17:12
+                         │  morning — the relay migration is merged
+                         │   🎉 1   🚀 1
+                         │
+                         │  bob  17:13
+                         │  nice. did the `h` tag enforcement land too?
+                         │
+                         │  alice  17:14
+                         │  yes, kind:9 without #h is rejected now
+                         │
+                         │  ┌ bob: nice. did the `h` tag enforcement land too?
+                         │  bob  17:15
+                         │  one less way to leak a message into the wrong room
+                         │
+                         │┌─────────────────────────────────────────────────────────────────────┐
+                         ││ message — / for commands, f1 for keys                               │
+                         │└─────────────────────────────────────────────────────────────────────┘
+ NAVIGATE  i write a message  r reply in thread  s add reaction  ctrl+k jump to a channel  f1 show keybindings

@@ -1,0 +1,317 @@
+/* buzz-tui
+ *
+ * One accent, a lot of whitespace, and the terminal doing the talking. The
+ * palette is the client's own default theme, so the site and the thing it
+ * describes look like the same piece of work.
+ */
+
+:root {
+  --accent: #89b4fa;
+  --mauve: #cba6f7;
+  --green: #a6e3a1;
+  --peach: #fab387;
+  --red: #f38ba8;
+
+  --bg: #11111b;
+  --panel: #181825;
+  --surface: #1e1e2e;
+  --line: #313244;
+
+  --text: #cdd6f4;
+  --muted: #a6adc8;
+  --dim: #6c7086;
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo,
+    Consolas, monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+
+  --measure: 46rem;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --accent: #1e66f5;
+    --mauve: #8839ef;
+    --green: #40a02b;
+    --peach: #fe640b;
+    --red: #d20f39;
+
+    --bg: #eff1f5;
+    --panel: #e6e9ef;
+    --surface: #dce0e8;
+    --line: #ccd0da;
+
+    --text: #4c4f69;
+    --muted: #5c5f77;
+    --dim: #8c8fa1;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.65;
+  /* Optical centring: content sits slightly above true centre, which reads as
+   * balanced rather than as having drifted upward. */
+  padding: clamp(3rem, 9vh, 7rem) 1.5rem 6rem;
+}
+
+main {
+  max-width: var(--measure);
+  margin: 0 auto;
+}
+
+/* ------------------------------------------------------------------ type */
+
+h1 {
+  font-size: clamp(2.2rem, 6vw, 3rem);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  margin: 0 0 0.75rem;
+  font-weight: 650;
+}
+
+h2 {
+  font-size: 1.05rem;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  color: var(--dim);
+  font-weight: 600;
+  margin: 4.5rem 0 1.25rem;
+}
+
+h3 {
+  font-size: 0.95rem;
+  color: var(--accent);
+  font-weight: 600;
+  margin: 2rem 0 0.6rem;
+}
+
+p {
+  margin: 0 0 1.1rem;
+  color: var(--muted);
+}
+
+.lede {
+  font-size: 1.2rem;
+  color: var(--text);
+  max-width: 38rem;
+  margin-bottom: 2rem;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  color: var(--mauve);
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  color: var(--text);
+  background: var(--surface);
+  /* Tight horizontal padding: anything more leaves a visible gap before the
+   * punctuation that follows an inline code span. */
+  padding: 0.1em 0.28em;
+  border-radius: 4px;
+}
+
+/* -------------------------------------------------------------- terminal */
+
+/* The hero is a real captured frame, not a mock-up, so it gets to look like
+ * a terminal rather than like a screenshot of one. */
+.term {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  margin: 0 0 2.5rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre;
+  color: var(--text);
+  tab-size: 4;
+}
+
+.term .rail {
+  color: var(--line);
+}
+.term .dim {
+  color: var(--dim);
+}
+.term .name {
+  color: var(--accent);
+  font-weight: 600;
+}
+.term .alt {
+  color: var(--mauve);
+  font-weight: 600;
+}
+.term .ok {
+  color: var(--green);
+}
+.term .badge {
+  color: var(--accent);
+  font-weight: 600;
+}
+.term .chip {
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+.term .key {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- install */
+
+.install {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  overflow-x: auto;
+}
+
+.install::before {
+  content: "$";
+  color: var(--dim);
+  flex: none;
+}
+
+.install code {
+  background: none;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.note {
+  font-size: 0.88rem;
+  color: var(--dim);
+  margin-top: 0.7rem;
+}
+
+/* ---------------------------------------------------------------- content */
+
+ul {
+  padding-left: 1.1rem;
+  margin: 0 0 1.2rem;
+}
+
+li {
+  margin-bottom: 0.55rem;
+  color: var(--muted);
+}
+
+li strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+pre.block {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: var(--muted);
+  margin: 0 0 1.2rem;
+}
+
+/* ------------------------------------------------------------- keybindings */
+
+.keys {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 0 2.5rem;
+}
+
+.keys table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
+.keys td {
+  padding: 0.16rem 0;
+  vertical-align: baseline;
+}
+
+.keys td.k {
+  font-family: var(--mono);
+  color: var(--mauve);
+  white-space: nowrap;
+  padding-right: 1rem;
+  width: 1%;
+}
+
+.keys td.d {
+  color: var(--muted);
+}
+
+/* --------------------------------------------------------------- footer */
+
+footer {
+  margin-top: 5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.85rem;
+  color: var(--dim);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+}
+
+footer a {
+  color: var(--muted);
+}
+
+/* The prose stays at a readable measure, but the terminal is a hundred columns
+ * wide and earns the extra room. Only break it out when the viewport can hold
+ * the wider box symmetrically; below that it fills the column and scrolls. */
+@media (min-width: 64rem) {
+  .term {
+    margin-inline: -4.5rem;
+    width: calc(100% + 9rem);
+  }
+}
+
+@media (max-width: 40rem) {
+  body {
+    font-size: 16px;
+    padding-top: 2.5rem;
+  }
+  .term {
+    font-size: 10px;
+    border-radius: 8px;
+  }
+}

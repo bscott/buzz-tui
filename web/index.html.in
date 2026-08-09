@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>buzztui — a terminal client for Buzz</title>
+    <meta
+      name="description"
+      content="A terminal client for Buzz relays. NIP-29 groups, gift-wrapped direct messages, inline images at native resolution, and keybindings that are actually yours."
+    />
+    <meta property="og:title" content="buzztui" />
+    <meta
+      property="og:description"
+      content="A terminal client for Buzz relays."
+    />
+    <meta property="og:type" content="website" />
+    <!-- Relative so the page works both under /buzz-tui/ and at the root of a
+         custom domain. Absolute paths would break one of the two. -->
+    <link rel="stylesheet" href="./style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🐝</text></svg>"
+    />
+  </head>
+
+  <body>
+    <main>
+      <h1>buzztui</h1>
+      <p class="lede">
+        A terminal client for <a href="https://github.com/block/buzz">Buzz</a>,
+        the workspace where people and agents share the same rooms. Speaks the
+        relay's protocol directly and renders it at whatever resolution your
+        terminal can manage.
+      </p>
+
+      <div class="term">{{HERO}}</div>
+
+      <h2>install</h2>
+      <div class="install">
+        <code
+          >curl -fsSL
+          https://raw.githubusercontent.com/{{REPO}}/main/install.sh | sh</code
+        >
+      </div>
+      <p class="note">
+        Latest release is <strong>{{VERSION}}</strong>. Verifies the download
+        against published checksums and installs to <code>~/.local/bin</code>.
+        Linux and macOS, x86_64 and arm64. Or build it yourself with
+        <code>cargo install --path .</code>.
+      </p>
+
+      <h2>what it does</h2>
+      <ul>
+        <li>
+          <strong>Channels, threads, and direct messages.</strong> NIP-29 groups
+          with NIP-10 threading, and NIP-17 gift-wrapped DMs that never leave
+          your machine in plaintext.
+        </li>
+        <li>
+          <strong>Works offline.</strong> Every event is cached in SQLite, so
+          the timeline is on screen before the socket finishes its handshake.
+          Messages written while disconnected are queued and sent on reconnect.
+        </li>
+        <li>
+          <strong>Images at native resolution.</strong> Inline pictures use the
+          terminal's own graphics protocol — kitty, sixel, or iTerm2 — and fall
+          back to unicode half-blocks.
+        </li>
+        <li>
+          <strong>Search.</strong> Full-text over everything cached, topped up
+          by the relay's NIP-50 index.
+        </li>
+        <li>
+          <strong>Keybindings that are actually yours.</strong> Every action is
+          named and rebindable. The help overlay and the hint bar are generated
+          from the live keymap, so they can never document a binding you have
+          changed.
+        </li>
+      </ul>
+
+      <h2>getting started</h2>
+      <p>
+        The first run asks for the community you are joining and the identity to
+        join it with. A relay address can be pasted as a bare hostname; a key is
+        either created for you or typed at a prompt that does not echo.
+      </p>
+      <pre class="block">
+$ buzztui
+
+community address: buzz.example.com
+  connected to Buzz Relay
+relay websocket url [wss://buzz.example.com]:
+identity
+  1  create a new key
+  2  paste a key you already have</pre
+      >
+      <p>
+        Most relays admit only keys their operator has added. If yours refuses
+        you, buzztui says so plainly and offers the request to fix it, ready to
+        paste.
+      </p>
+
+      <h2>keybindings</h2>
+      <p>
+        Three scopes. The composer owns every unmodified printable key, so
+        nothing reachable while typing can make a character untypable. The
+        leader is <code>{{LEADER}}</code>, and everything below is rebindable by
+        action name in <code>keys.toml</code>.
+      </p>
+      <div class="keys">{{KEYS}}</div>
+      <p class="note">
+        Generated from the binary at {{VERSION}} — this table cannot drift from
+        what the program actually does.
+      </p>
+
+      <footer>
+        <a href="https://github.com/{{REPO}}">source</a>
+        <a href="https://github.com/{{REPO}}/releases">releases</a>
+        <a href="https://github.com/block/buzz">buzz</a>
+        <span>MIT</span>
+      </footer>
+    </main>
+  </body>
+</html>

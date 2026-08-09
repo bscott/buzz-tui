@@ -284,9 +284,29 @@ drawn at. Set it to your font's real cell size if pictures look stretched.
 ## Development
 
 ```bash
-cargo test          # 157 tests, no network
+cargo test          # 158 tests, no network
+cargo clippy --all-targets -- -D warnings
 cargo run -- doctor
 ```
+
+### The website
+
+`web/` holds the source for the project page, which CI renders and publishes to
+GitHub Pages. It is generated rather than hand-written because the version and
+the keybinding table are read from the program itself — `web/build.py` runs
+`buzztui keys` — so the page cannot quietly fall behind the code:
+
+```bash
+cargo build --release
+python3 web/build.py --binary target/release/buzztui --out site
+python3 -m http.server -d site 8000
+```
+
+That coupling is also why the Pages workflow triggers on `src/**` and
+`Cargo.toml` as well as `web/**`. To serve it from a custom domain, set a
+repository variable named `PAGES_DOMAIN`; the build writes the `CNAME` for you.
+Assets are referenced relatively, so the page works both under
+`/buzz-tui/` and at the root of a domain.
 
 ## License
 
