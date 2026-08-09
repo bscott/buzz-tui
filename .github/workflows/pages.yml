@@ -13,8 +13,13 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/pages.yml"
-  # A release changes what the install section should say, and tags do not
-  # touch the paths above.
+  # Releases published by `release.yml` do not reach this trigger: GitHub
+  # suppresses events raised with the default GITHUB_TOKEN, so an automated
+  # release starts no workflow run. It stays because a release published by
+  # hand does fire it, and it costs nothing meanwhile: the version the page
+  # states comes from Cargo.toml, which is committed before the tag is cut,
+  # so the push trigger above has already republished the page by the time
+  # the release exists.
   release:
     types: [published]
   workflow_dispatch:
