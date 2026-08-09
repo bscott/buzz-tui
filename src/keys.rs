@@ -139,6 +139,7 @@ pub enum Action {
     OpenMembers,
     OpenProfile,
     OpenDirectMessage,
+    CopyIdentity,
 
     // view
     ToggleSidebar,
@@ -233,6 +234,7 @@ const SPECS: &[Spec] = &[
     spec(Action::OpenSearch, "search", Group::Channels, "search messages"),
     spec(Action::OpenMembers, "members", Group::Channels, "show members"),
     spec(Action::OpenProfile, "profile", Group::Channels, "show author profile"),
+    spec(Action::CopyIdentity, "copy_identity", Group::Application, "copy your public key"),
     spec(Action::OpenDirectMessage, "direct_message", Group::Channels, "start a direct message"),
 
     spec(Action::ToggleSidebar, "toggle_sidebar", Group::View, "show or hide the sidebar"),
@@ -1007,6 +1009,7 @@ const DEFAULTS: &[(Scope, &[&str], Action)] = &[
     (Scope::Leader, &["leader+j"], Action::JoinChannel),
     (Scope::Leader, &["leader+x"], Action::LeaveChannel),
     (Scope::Leader, &["leader+d"], Action::OpenDirectMessage),
+    (Scope::Leader, &["leader+y"], Action::CopyIdentity),
     (Scope::Leader, &["leader+m"], Action::ToggleMute),
     (Scope::Leader, &["leader+p"], Action::TogglePin),
     (Scope::Leader, &["leader+a"], Action::MarkRead),

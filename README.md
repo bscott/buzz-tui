@@ -9,26 +9,38 @@ NIP-42 authentication, NIP-17 gift-wrapped direct messages — and renders it at
 whatever resolution your terminal can manage.
 
 ```
- channels  2             │ # engineering  ·  where the work happens          ● online  localhost:3000
- # engineering        4  │
- # releases              │   today ──────────────────────────────────────────────────────────────────
+ channels  3             │ # engineering  ·  where the work happens      ● online  127.0.0.1:7447
+ # design             1  │
+ # releases           2  │
+ # engineering           │
                          │
-                         │  alice  15:37
+                         │   today ──────────────────────────────────────────────────────────────
+                         │
+                         │  alice  17:12
                          │  morning — the relay migration is merged
-                         │   🎉 1
+                         │   🎉 1   🚀 1
                          │
-                         │  bob  15:38
+                         │  bob  17:13
                          │  nice. did the `h` tag enforcement land too?
                          │
-                         │  ┌ bob: nice. did the `h` tag enforcement land too?
-                         │  alice  15:39
+                         │  alice  17:14
                          │  yes, kind:9 without #h is rejected now
                          │
-                         │┌──────────────────────────────────────────────────────────────────────────┐
-                         ││ message — / for commands, f1 for keys                                    │
-                         │└──────────────────────────────────────────────────────────────────────────┘
- NAVIGATE  i write a message  r reply in thread  s add reaction  ctrl+k jump to a channel  f1 keys
+                         │  ┌ bob: nice. did the `h` tag enforcement land too?
+                         │  bob  17:15
+                         │  one less way to leak a message into the wrong room
+                         │
+                         │┌─────────────────────────────────────────────────────────────────────┐
+                         ││ message — / for commands, f1 for keys                               │
+                         │└─────────────────────────────────────────────────────────────────────┘
+ NAVIGATE  i write a message  r reply in thread  s add reaction  ctrl+k jump to a channel  f1 show keybindings
 ```
+
+<sub>Transcribed from a real session against a local relay. Unread counts sit
+right-aligned in the rail, the open channel carries none, reactions gather under
+the message they belong to, and a reply quotes its parent. The bar along the
+bottom appears only while the keyboard is on the conversation, and every key in
+it is read from your own keymap.</sub>
 
 ## What it does
 
@@ -60,22 +72,40 @@ cargo install --path .
 ## Getting started
 
 ```bash
-buzztui login                       # creates and stores an identity
-buzztui --relay ws://localhost:3000 # connect
+buzztui
 ```
 
-With no relay flag, `buzztui` reads `relay` from its configuration, falling back
-to `BUZZTUI_RELAY` and then `BUZZ_RELAY_URL`.
+The first run asks for two things: the community you are joining, and the
+identity to join it with. The community is a relay address — `wss://…`, or just
+a hostname, which is resolved for you and confirmed by reading the relay's
+NIP-11 document back. The identity is either a new key or one you already have,
+typed at a hidden prompt.
+
+Re-run it any time with `buzztui setup`. It keeps your existing key by default;
+replacing one means typing `replace` in full, because there is no recovery.
+
+Most relays admit only keys their operator has added. If yours refuses you,
+buzztui says so plainly, and `ctrl+b y` copies a request — your public key and
+the `add-member` line — ready to send to whoever runs it.
 
 Other subcommands:
 
 | Command | Purpose |
 |---|---|
-| `buzztui login [--nsec …] [--force]` | Store an identity, generating one if none is given |
+| `buzztui setup` | Choose a community and an identity |
+| `buzztui login --import` | Import an existing key at a hidden prompt |
+| `buzztui login --nsec-file <path>` | Import from a file, for scripted installs |
 | `buzztui whoami` | Print your public key as npub and hex |
 | `buzztui keys` | Print the active binding table, including your overrides |
-| `buzztui doctor` | Check the relay URL, identity, database, graphics protocol, and keymap |
+| `buzztui doctor` | Check the relay, identity, database, graphics, and keymap |
 | `buzztui paths` | Print where everything lives |
+
+Add `--force` to replace an identity that is already stored. There is also a
+`--nsec <key>` flag, but avoid it: your shell records it in history and the
+process list exposes it while it runs.
+
+`--relay <url>` overrides the configured community for one run; otherwise the
+configuration wins, falling back to `BUZZTUI_RELAY` and then `BUZZ_RELAY_URL`.
 
 ## Files
 
@@ -86,9 +116,13 @@ Everything lives in `~/.config/buzztui`, or `$BUZZTUI_HOME` when set.
 | `config.toml` | Relay, interface, and media settings |
 | `keys.toml` | Your keybinding overrides — optional |
 | `secret.key` | Your identity, written `0600` |
-| `buzz.db` | Cached events, channels, profiles, and read state |
-| `media/` | Downloaded images |
+| `cache/<pubkey>/buzz.db` | Cached events, channels, profiles, and read state |
+| `cache/<pubkey>/media/` | Downloaded images |
 | `buzztui.log` | Diagnostics; set `BUZZTUI_LOG=buzztui=debug` for more |
+
+The cache is per identity, and each database records which key owns it and
+refuses to open under another. Decrypted direct messages live there, so
+switching keys must never hand one account's private timeline to the next.
 
 Your secret key is your account. Back up `secret.key`; there is no recovery.
 
@@ -204,30 +238,33 @@ the answer along with the cell size it will use:
 graphics   kitty  (cell 9x18)
 ```
 
-Images are downloaded once into `media/`, decoded off the render path, and
-dropped from memory when they scroll away. Anything the terminal cannot draw
-with pixels falls back to unicode half-blocks, which always render.
+Images are downloaded once into the per-identity `media/` directory, decoded off
+the render path, and dropped from memory when they scroll away. Anything the
+terminal cannot draw with pixels falls back to unicode half-blocks, which always
+render.
 
-Two things are worth knowing.
+Detection is deliberately conservative, for a reason worth knowing: **answering
+a capability query is not the same as forwarding the image.** Herdr replies `OK`
+to the kitty query and then discards the payload, so a client that believes it
+reserves the rows and draws nothing at all — strictly worse than coarse blocks.
+A pixel protocol is adopted only when the terminal both claims it and reports
+its cell geometry.
 
-**Some terminals will not report their cell size.** Multiplexers in particular
-answer the capability query but refuse the geometry one, and the underlying
-library discards a perfectly good protocol when that happens. `buzztui` asks
-again on its own and assumes `media.cell_size` — only the number of rows an
-image occupies depends on it, not the resolution. If pictures look stretched,
-set it to your font's real cell size.
+If you know better than the probe, say so:
 
-**Some hosts claim graphics support they do not deliver.** Herdr answers the
-kitty capability query with `OK` and then drops the image payload, so a client
-that believes it reserves rows and draws nothing. `buzztui` therefore stays on
-half-blocks inside Herdr rather than leaving a hole in the timeline. Set
-`media.protocol = "kitty"` to override that if a future version passes graphics
-through.
+```toml
+[media]
+protocol = "kitty"      # insist, whatever detection concluded
+cell_size = [9, 18]     # needed when the terminal will not report one
+```
+
+`cell_size` decides how many rows an image occupies, not the resolution it is
+drawn at. Set it to your font's real cell size if pictures look stretched.
 
 ## Development
 
 ```bash
-cargo test          # 148 tests, no network
+cargo test          # 157 tests, no network
 cargo run -- doctor
 ```
 

@@ -16,14 +16,33 @@ use serde::{Deserialize, Serialize};
 /// Directory name used under the configuration root.
 const APP_DIR: &str = "buzztui";
 
+/// Written at the top of a generated `config.toml`. Every setting here can be
+/// changed by hand; the interface reloads them without a restart.
+const CONFIG_HEADER: &str = r#"# buzztui configuration — https://github.com/bscott/buzz-tui
+#
+# Edit this by hand and reload from inside buzztui with the reload_config
+# binding (ctrl+b R by default), or restart.
+#
+#   relay    websocket address of your community, ws:// or wss://
+#   gateway  http base for media and relay metadata. omit it and the relay's
+#            own host is used, which is right for most deployments. set it
+#            when a gateway or cdn serves media from elsewhere, for example
+#            gateway = "https://media.example.com"
+"#;
+
+
 /// Resolved locations of every file buzztui reads or writes.
+///
+/// The cache is deliberately not a single path. It holds decrypted direct
+/// messages and per-account read state, so each identity gets its own
+/// directory: rotating or importing a key must never hand one account's
+/// private timeline to another.
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub root: PathBuf,
     pub config: PathBuf,
     pub secret: PathBuf,
-    pub db: PathBuf,
-    pub media: PathBuf,
+    pub cache: PathBuf,
     pub log: PathBuf,
 }
 
@@ -44,20 +63,45 @@ impl Paths {
         Ok(Self {
             config: root.join("config.toml"),
             secret: root.join("secret.key"),
-            db: root.join("buzz.db"),
-            media: root.join("media"),
+            cache: root.join("cache"),
             log: root.join("buzztui.log"),
             root,
         })
+    }
+
+    /// The cache directory belonging to one identity.
+    fn identity_dir(&self, pubkey: &str) -> PathBuf {
+        // A prefix is enough to separate accounts and keeps the path readable;
+        // a collision would need a deliberate 64-bit preimage.
+        let short: String = pubkey.chars().take(16).collect();
+        self.cache.join(short)
+    }
+
+    pub fn db_for(&self, pubkey: &str) -> PathBuf {
+        self.identity_dir(pubkey).join("buzz.db")
+    }
+
+    pub fn media_for(&self, pubkey: &str) -> PathBuf {
+        self.identity_dir(pubkey).join("media")
     }
 
     /// Creates the application directory tree if any part of it is missing.
     pub fn ensure(&self) -> Result<()> {
         fs::create_dir_all(&self.root)
             .with_context(|| format!("creating {}", self.root.display()))?;
-        fs::create_dir_all(&self.media)
-            .with_context(|| format!("creating {}", self.media.display()))?;
+        fs::create_dir_all(&self.cache)
+            .with_context(|| format!("creating {}", self.cache.display()))?;
         restrict(&self.root)?;
+        restrict(&self.cache)?;
+        Ok(())
+    }
+
+    /// Creates the per-identity cache, owner-readable only.
+    pub fn ensure_identity(&self, pubkey: &str) -> Result<()> {
+        self.ensure()?;
+        let media = self.media_for(pubkey);
+        fs::create_dir_all(&media).with_context(|| format!("creating {}", media.display()))?;
+        restrict(&self.identity_dir(pubkey))?;
         Ok(())
     }
 }
@@ -68,6 +112,11 @@ impl Paths {
 pub struct Config {
     /// WebSocket URL of the active Buzz relay. One relay is one community.
     pub relay: String,
+    /// HTTP base for media, uploads, and relay metadata. Most deployments serve
+    /// these from the same host as the relay, so this is normally left unset
+    /// and derived from `relay`. Set it when a gateway sits in front, or when
+    /// media lives on a different host entirely.
+    pub gateway: Option<String>,
     pub ui: UiConfig,
     pub media: MediaConfig,
     /// Per-token palette overrides applied on top of the named theme, keyed by
@@ -78,7 +127,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            relay: "ws://localhost:3000".to_string(),
+            relay: String::new(),
+            gateway: None,
             ui: UiConfig::default(),
             media: MediaConfig::default(),
             theme: BTreeMap::new(),
@@ -172,8 +222,7 @@ impl Config {
     pub fn save(&self, paths: &Paths) -> Result<()> {
         paths.ensure()?;
         let body = toml::to_string_pretty(self).context("serialising configuration")?;
-        let doc =
-            format!("# buzztui configuration\n# https://github.com/bscott/buzz-tui\n\n{body}");
+        let doc = format!("{CONFIG_HEADER}\n{body}");
         fs::write(&paths.config, doc)
             .with_context(|| format!("writing {}", paths.config.display()))?;
         Ok(())
@@ -192,9 +241,29 @@ impl Config {
         }
     }
 
-    /// Normalises the relay WebSocket URL into the `http(s)` origin used for
-    /// Blossom media downloads and NIP-11 metadata.
+    /// Whether a community has actually been chosen. The relay stays empty
+    /// until someone says otherwise, so a freshly written configuration can
+    /// never be mistaken for a configured one.
+    pub fn has_community(&self) -> bool {
+        !self.relay.trim().is_empty()
+    }
+
+    /// The HTTP origin used for Blossom media downloads and NIP-11 metadata:
+    /// the configured gateway when there is one, otherwise the relay's own host.
     pub fn http_origin(&self) -> String {
+        if let Some(gateway) = self
+            .gateway
+            .as_deref()
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+        {
+            return gateway.trim_end_matches('/').to_string();
+        }
+        self.http_origin_from_relay()
+    }
+
+    /// The HTTP origin the relay's own host implies, ignoring any gateway.
+    pub fn http_origin_from_relay(&self) -> String {
         let relay = self.relay.trim_end_matches('/');
         match relay.split_once("://") {
             Some(("wss", rest)) => format!("https://{rest}"),
@@ -267,9 +336,80 @@ fn restrict(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// This repository is public. Nothing naming a particular person or a
+    /// particular private deployment belongs in it, and a hostname pasted into
+    /// a test during development is the easiest way for one to slip out.
+    ///
+    /// Detection is by shape, not by keyword: a bech32 key is its prefix
+    /// followed by a long payload, so the literal `npub1` in parsing code and
+    /// the short `npub1abc` of documentation both pass.
+    #[test]
+    fn no_source_file_names_a_real_deployment_or_identity() {
+        fn long_bech32(line: &str, prefix: &str) -> bool {
+            line.match_indices(prefix).any(|(at, _)| {
+                line[at + prefix.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    .count()
+                    >= 20
+            })
+        }
+        // A private-network hostname has a label before the suffix; the bare
+        // string in this test does not.
+        fn private_host(line: &str) -> bool {
+            line.match_indices(".ts.net").any(|(at, _)| {
+                line[..at]
+                    .chars()
+                    .last()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+            })
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let Ok(body) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (number, line) in body.lines().enumerate() {
+                    if long_bech32(line, "npub1")
+                        || long_bech32(line, "nsec1")
+                        || private_host(line)
+                    {
+                        offenders.push(format!(
+                            "{}:{}: {}",
+                            path.file_name().unwrap_or_default().to_string_lossy(),
+                            number + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a real host or key reached the source:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     #[test]
     fn http_origin_maps_websocket_schemes() {
         let mut config = Config::default();
+        config.relay = "ws://localhost:3000".to_string();
         assert_eq!(config.http_origin(), "http://localhost:3000");
         config.relay = "wss://buzz.example.com/".to_string();
         assert_eq!(config.http_origin(), "https://buzz.example.com");

@@ -155,7 +155,7 @@ fn render_picker(frame: &mut Frame, app: &App, picker: &Picker) {
     let height = list.height as usize;
     let offset = picker.cursor.saturating_sub(height.saturating_sub(1));
     let mut lines: Vec<Line> = Vec::new();
-    for (row, &index) in picker.filtered.iter().enumerate().skip(offset).take(height).map(|(r, i)| (r, i)) {
+    for (row, &index) in picker.filtered.iter().enumerate().skip(offset).take(height) {
         let item = &picker.items[index];
         let selected = row == picker.cursor;
         let style = if selected {

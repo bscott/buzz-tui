@@ -45,6 +45,29 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         ..area
     };
 
+    // A relay that refuses your key leaves nothing to show, and "no channel
+    // open" would blame the wrong thing. Name what happened and hand over the
+    // exact request an administrator needs.
+    if app.membership_rejected().is_some() {
+        let npub = app.npub();
+        widgets::empty_state(
+            frame,
+            content,
+            &app.palette,
+            "this relay does not know your key",
+            "a buzz community admits only keys its operator has added, and yours \
+             is not on the list yet",
+            &[
+                (
+                    &app.keymap.hint(crate::keys::Action::CopyIdentity),
+                    "copy a request to send them",
+                ),
+                (&npub, "your public key"),
+            ],
+        );
+        return;
+    }
+
     if app.active.is_none() {
         widgets::empty_state(
             frame,
@@ -53,8 +76,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             "no channel open",
             "a channel is one room in this community; everything in it is a signed event",
             &[
-                (&app.keymap.hint(crate::keys::Action::OpenSwitcher), "jump to a channel"),
-                (&app.keymap.hint(crate::keys::Action::CreateChannel), "create one"),
+                (
+                    &app.keymap.hint(crate::keys::Action::OpenSwitcher),
+                    "jump to a channel",
+                ),
+                (
+                    &app.keymap.hint(crate::keys::Action::CreateChannel),
+                    "create one",
+                ),
             ],
         );
         return;

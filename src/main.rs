@@ -7,12 +7,14 @@ mod keys;
 mod media;
 mod model;
 mod net;
+mod onboard;
 mod overlay;
 mod proto;
 mod store;
 mod ui;
 
-use std::io::stdout;
+use std::io::{IsTerminal, stdout};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,10 +55,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Sub {
+    /// Choose a community and an identity. Runs automatically on first launch.
+    Setup,
     /// Store an identity, generating one when none is supplied.
     Login {
-        /// An existing secret key, as `nsec1…` or 64 hex characters.
+        /// Import an existing key, prompting for it without echoing.
         #[arg(long)]
+        import: bool,
+        /// Read an existing key from a file, for scripted installs.
+        #[arg(long, value_name = "PATH")]
+        nsec_file: Option<PathBuf>,
+        /// Pass a key directly. Unsafe: your shell records it in history and
+        /// the process list exposes it. Prefer `--import` or `--nsec-file`.
+        #[arg(long, value_name = "NSEC")]
         nsec: Option<String>,
         /// Replace an identity that is already stored.
         #[arg(long)]
@@ -73,8 +84,15 @@ enum Sub {
 }
 
 fn main() -> Result<()> {
+    // Both reqwest and tokio-tungstenite construct rustls clients, and doing so
+    // without a process-wide provider installed panics rather than erroring.
+    // Setup reaches for HTTP before any of them, so it is installed here first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
     let paths = Paths::resolve()?;
+    // Whether a community has been chosen is a property of the configuration,
+    // not of the file existing: reading it creates one.
     paths.ensure()?;
 
     let mut config = Config::load_or_create(&paths)?;
@@ -84,13 +102,33 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Sub::Login { nsec, force }) => login(&paths, nsec.as_deref(), force),
+        Some(Sub::Setup) => onboard::run(&paths, &mut config),
+        Some(Sub::Login {
+            import,
+            nsec_file,
+            nsec,
+            force,
+        }) => {
+            // A key is meaningless without a community to present it to, so
+            // collect that first when nobody has chosen one yet.
+            if !config.has_community() && std::io::stdin().is_terminal() {
+                onboard::prompt_community(&paths, &mut config)?;
+                println!();
+            }
+            login(&paths, import, nsec_file.as_deref(), nsec.as_deref(), force)
+        }
         Some(Sub::Whoami) => whoami(&paths),
         Some(Sub::Paths) => {
             println!("config  {}", paths.config.display());
             println!("keys    {}", paths.secret.display());
-            println!("data    {}", paths.db.display());
-            println!("media   {}", paths.media.display());
+            println!("cache   {}", paths.cache.display());
+            if let Ok(Some(secret)) = config::load_secret(&paths) {
+                if let Ok(keys) = Keys::parse(&secret) {
+                    let me = keys.public_key().to_hex();
+                    println!("data    {}", paths.db_for(&me).display());
+                    println!("media   {}", paths.media_for(&me).display());
+                }
+            }
             println!("log     {}", paths.log.display());
             Ok(())
         }
@@ -100,6 +138,12 @@ fn main() -> Result<()> {
         }
         Some(Sub::Doctor) => doctor(&paths, &config),
         None => {
+            // A community and an identity are both required before the
+            // interface can show anything; ask for whichever is missing.
+            if onboard::is_first_run(&paths, &config) {
+                onboard::run(&paths, &mut config)?;
+                println!("\nstarting buzztui\n");
+            }
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -132,22 +176,43 @@ fn load_or_create_identity(paths: &Paths) -> Result<(Keys, bool)> {
     }
 }
 
-fn login(paths: &Paths, nsec: Option<&str>, force: bool) -> Result<()> {
+fn login(
+    paths: &Paths,
+    import: bool,
+    nsec_file: Option<&std::path::Path>,
+    nsec: Option<&str>,
+    force: bool,
+) -> Result<()> {
     if paths.secret.exists() && !force {
         bail!(
             "{} already holds an identity; pass --force to replace it",
             paths.secret.display()
         );
     }
-    let keys = match nsec {
-        Some(secret) => Keys::parse(secret).context("that is not a valid nsec or hex secret key")?,
+
+    let supplied = match (import, nsec_file, nsec) {
+        (_, Some(path), _) => Some(onboard::read_key_file(path)?),
+        (_, None, Some(secret)) => {
+            // Honour it, but do not let it pass silently: the key is now in
+            // shell history and was visible in the process list while running.
+            eprintln!(
+                "warning: --nsec puts your secret key in shell history and the process list.\n\
+                 warning: prefer --import or --nsec-file, and consider clearing your history."
+            );
+            Some(secret.to_string())
+        }
+        (true, None, None) => Some(onboard::prompt_secret("nsec (hidden)")?),
+        (false, None, None) => None,
+    };
+
+    let generated = supplied.is_none();
+    let keys = match supplied {
+        Some(secret) => {
+            Keys::parse(secret.trim()).context("that is not a valid nsec or hex secret key")?
+        }
         None => Keys::generate(),
     };
-    let secret = keys
-        .secret_key()
-        .to_bech32()
-        .map_err(|_| anyhow::anyhow!("could not encode the key"))?;
-    config::store_secret(paths, &secret)?;
+    onboard::store(paths, &keys)?;
 
     let npub = keys
         .public_key()
@@ -155,8 +220,11 @@ fn login(paths: &Paths, nsec: Option<&str>, force: bool) -> Result<()> {
         .unwrap_or_else(|_| keys.public_key().to_hex());
     println!("identity stored in {}", paths.secret.display());
     println!("public key  {npub}");
-    if nsec.is_none() {
-        println!("\nthis key is your account. back up {} — there is no recovery.", paths.secret.display());
+    if generated {
+        println!(
+            "\nthis key is your account. back up {} — there is no recovery.",
+            paths.secret.display()
+        );
     }
     Ok(())
 }
@@ -230,12 +298,22 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
         }
     }
 
-    match Store::open(&paths.db, "0".repeat(64).as_str()) {
-        Ok(_) => println!("database   {}", paths.db.display()),
-        Err(err) => {
-            println!("database   ! {err}");
-            problems += 1;
+    match config::load_secret(paths).ok().flatten().and_then(|s| Keys::parse(&s).ok()) {
+        Some(keys) => {
+            let me = keys.public_key().to_hex();
+            let db = paths.db_for(&me);
+            paths.ensure_identity(&me)?;
+            match Store::open(&db, &me) {
+                Ok(_) => println!("database   {}", db.display()),
+                Err(err) => {
+                    println!("database   ! {err}");
+                    problems += 1;
+                }
+            }
         }
+        // Opening a cache under a placeholder pubkey would stamp it with an
+        // owner nobody holds the key for.
+        None => println!("database   none yet"),
     }
 
     // Probing writes escape sequences and reads the replies, which is safe here
@@ -244,8 +322,8 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
     let media = Media::new(
         picker,
         config.media.clone(),
-        paths.media.clone(),
-        Arc::new(Store::open(&paths.db, &"0".repeat(64))?),
+        std::env::temp_dir().join("buzztui-probe"),
+        Arc::new(Store::scratch()?),
         mpsc::unbounded_channel().0,
     );
     let (cell_w, cell_h) = media.font_size();
@@ -287,7 +365,8 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
 
     let (keypair, generated) = load_or_create_identity(&paths)?;
     let me = keypair.public_key().to_hex();
-    let store = Arc::new(Store::open(&paths.db, &me)?);
+    paths.ensure_identity(&me)?;
+    let store = Arc::new(Store::open(&paths.db_for(&me), &me)?);
 
     let (file, mut diagnostics) = KeyFile::load(&paths.root.join("keys.toml"));
     let keymap = Keymap::with_overrides(file);
@@ -306,7 +385,7 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
     let media = Media::new(
         picker,
         config.media.clone(),
-        paths.media.clone(),
+        paths.media_for(&me),
         Arc::clone(&store),
         media_tx,
     );

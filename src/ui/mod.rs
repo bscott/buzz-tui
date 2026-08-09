@@ -175,20 +175,44 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, narrow: bool) {
         Span::styled(format!("{glyph} "), style),
         Span::styled(label, style),
     ];
-    if !narrow {
-        let host = app
-            .config
-            .relay
-            .trim_start_matches("wss://")
-            .trim_start_matches("ws://");
-        right.push(Span::styled(format!("  {host} "), palette.pending()));
-    } else {
-        right.push(Span::raw(" "));
+
+    // A rejection is not transient: a key the relay will not admit stays
+    // rejected, and a toast that expires after a few seconds leaves the user
+    // staring at "offline" with no idea why. The reason displaces the host,
+    // which is the less useful of the two once the connection has failed.
+    match &app.conn {
+        ConnState::Failed(reason) if !narrow => {
+            right.push(Span::styled(
+                format!("  {} ", failure_summary(reason)),
+                palette.error(),
+            ));
+        }
+        _ if !narrow => {
+            let host = app
+                .config
+                .relay
+                .trim_start_matches("wss://")
+                .trim_start_matches("ws://");
+            right.push(Span::styled(format!("  {host} "), palette.pending()));
+        }
+        _ => right.push(Span::raw(" ")),
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(right).right_aligned()),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(right).right_aligned()), area);
+}
+
+/// Reduces a relay failure to the part a human can act on.
+///
+/// Reasons arrive as layered machine prefixes — `auth rejected: restricted: not
+/// a relay member` — and only the tail carries the meaning.
+fn failure_summary(reason: &str) -> String {
+    let tail = reason.rsplit(": ").next().unwrap_or(reason).trim();
+    // Drop the errno parenthetical that adds nothing for a reader.
+    let tail = tail
+        .split_once(" (os error")
+        .map_or(tail, |(head, _)| head)
+        .trim();
+    let tail = if tail.is_empty() { reason } else { tail };
+    text::truncate_end(&tail.to_lowercase(), 40).into_owned()
 }
 
 // ----------------------------------------------------------------- composer
@@ -393,4 +417,40 @@ fn hint_bar(app: &App) -> Option<Line<'static>> {
         spans.push(Span::styled(format!(" {}  ", action.help()), palette.dim()));
     }
     Some(Line::from(spans))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::failure_summary;
+
+    /// A rejection the user can act on must survive the trip from the wire to
+    /// the status line; these are verbatim reasons from a real Buzz relay.
+    #[test]
+    fn a_failure_reason_keeps_the_part_that_means_something() {
+        assert_eq!(
+            failure_summary("auth rejected: restricted: not a relay member"),
+            "not a relay member"
+        );
+        assert_eq!(
+            failure_summary("connect: IO error: Connection refused (os error 111)"),
+            "connection refused"
+        );
+        assert_eq!(
+            failure_summary("auth-required: verification failed"),
+            "verification failed"
+        );
+    }
+
+    #[test]
+    fn a_reason_without_layers_survives_intact() {
+        assert_eq!(failure_summary("relay closed"), "relay closed");
+        // A trailing separator must not reduce the reason to nothing.
+        assert_eq!(failure_summary("timed out: "), "timed out: ");
+    }
+
+    #[test]
+    fn a_long_reason_is_bounded_so_it_cannot_push_the_channel_name_off_screen() {
+        let summary = failure_summary(&format!("error: {}", "x".repeat(200)));
+        assert!(crate::ui::text::width(&summary) <= 40, "{summary}");
+    }
 }

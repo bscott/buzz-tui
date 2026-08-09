@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use nostr::event::Event;
 use parking_lot::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -91,6 +91,12 @@ impl Store {
         Self::from_connection(Connection::open_in_memory()?, me)
     }
 
+    /// A throwaway cache with no identity attached, for code paths that need a
+    /// store to exist but must never touch a real account's data.
+    pub fn scratch() -> Result<Self> {
+        Self::from_connection(Connection::open_in_memory()?, "")
+    }
+
     fn from_connection(conn: Connection, me: &str) -> Result<Self> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
@@ -106,7 +112,39 @@ impl Store {
             me: me.to_string(),
         };
         store.migrate()?;
+        store.claim()?;
         Ok(store)
+    }
+
+    /// Records which identity owns this cache, and refuses to open one that
+    /// belongs to someone else.
+    ///
+    /// The cache holds decrypted direct messages. Paths already separate
+    /// identities, but a copied or restored file would slip past that, and
+    /// silently showing one account another's private timeline is the worst
+    /// failure this program could have.
+    fn claim(&self) -> Result<()> {
+        let conn = self.lock();
+        let owner: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key = 'owner'", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match owner {
+            Some(owner) if owner != self.me => bail!(
+                "this cache belongs to {}, not {}; refusing to open it",
+                proto::short_pubkey(&owner),
+                proto::short_pubkey(&self.me)
+            ),
+            Some(_) => Ok(()),
+            None => {
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('owner', ?1)",
+                    params![self.me],
+                )?;
+                Ok(())
+            }
+        }
     }
 
     fn migrate(&self) -> Result<()> {
@@ -118,6 +156,11 @@ impl Store {
 
         conn.execute_batch(
             r#"
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS events (
                 id          TEXT PRIMARY KEY,
                 pubkey      TEXT NOT NULL,
@@ -1031,6 +1074,70 @@ mod tests {
 
     fn store_with(keys: &Keys) -> Store {
         Store::in_memory(&keys.public_key().to_hex()).unwrap()
+    }
+
+    /// The cache holds decrypted direct messages, so a second identity must
+    /// never be able to read one it does not own. Paths separate them, and this
+    /// is the backstop for a file that gets copied or restored anyway.
+    #[test]
+    fn a_cache_refuses_an_identity_it_does_not_belong_to() {
+        let dir = std::env::temp_dir().join(format!("buzztui-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("buzz.db");
+        let _ = std::fs::remove_file(&path);
+
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let alice_hex = alice.public_key().to_hex();
+
+        // Alice reads a direct message into her cache.
+        {
+            let store = Store::open(&path, &alice_hex).unwrap();
+            let rumor = Rumor {
+                id: &"d".repeat(64),
+                author: &bob.public_key().to_hex(),
+                created_at: 1_700_000_000,
+                body: "the vault password is hunter2",
+                tags: "[]",
+                parent: None,
+                root: None,
+                mentions_me: true,
+            };
+            let channel = direct_channel_id(&bob.public_key().to_hex());
+            store.ingest_rumor(&rumor, &channel).unwrap();
+        }
+
+        // Reopening as Alice is fine.
+        assert!(Store::open(&path, &alice_hex).is_ok());
+
+        // Opening the same file as Bob must fail rather than hand over her
+        // decrypted timeline.
+        let err = match Store::open(&path, &bob.public_key().to_hex()) {
+            Ok(_) => panic!("a foreign identity must not open this cache"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("belongs to"), "{err}");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Each identity gets its own file, which is the first line of defence.
+    #[test]
+    fn identities_do_not_share_a_cache_path() {
+        let paths = crate::config::Paths {
+            root: "/tmp/x".into(),
+            config: "/tmp/x/config.toml".into(),
+            secret: "/tmp/x/secret.key".into(),
+            cache: "/tmp/x/cache".into(),
+            log: "/tmp/x/log".into(),
+        };
+        let alice = "a".repeat(64);
+        let bob = "b".repeat(64);
+        assert_ne!(paths.db_for(&alice), paths.db_for(&bob));
+        assert_ne!(paths.media_for(&alice), paths.media_for(&bob));
+        // And the same identity is stable across calls.
+        assert_eq!(paths.db_for(&alice), paths.db_for(&alice));
     }
 
     #[test]

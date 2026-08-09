@@ -750,6 +750,7 @@ impl App {
             Action::OpenMembers => {
                 self.show_members = !self.show_members;
             }
+            Action::CopyIdentity => self.copy_identity(),
             Action::OpenProfile => {
                 if let Some(author) = self.selected_message().map(|m| m.author.clone()) {
                     self.overlay = Some(Overlay::Profile(author));
@@ -854,15 +855,10 @@ impl App {
         }
         let last = self.timeline.len() - 1;
         self.selected = Some(match self.selected {
-            // Entering selection from the bottom starts at the newest message,
-            // which is what the eye is already on.
-            None => {
-                if delta < 0 {
-                    last
-                } else {
-                    last
-                }
-            }
+            // Selection always begins at the newest message, whichever
+            // direction the key implies: the view is pinned to the bottom, so
+            // that is where the eye already is.
+            None => last,
             Some(index) => (index as isize + delta).clamp(0, last as isize) as usize,
         });
         self.follow = false;
@@ -1296,6 +1292,55 @@ impl App {
                 self.focus = Focus::Composer;
             }
             Err(err) => self.error("clipboard unavailable", err.to_string()),
+        }
+    }
+
+    /// Your public key, as an npub.
+    pub fn npub(&self) -> String {
+        self.keypair
+            .public_key()
+            .to_bech32()
+            .unwrap_or_else(|_| self.me.clone())
+    }
+
+    /// The reason the relay refused this identity, when the refusal is about
+    /// who you are rather than whether the network is reachable. The two need
+    /// completely different advice, so they are told apart here.
+    pub fn membership_rejected(&self) -> Option<&str> {
+        let ConnState::Failed(reason) = &self.conn else {
+            return None;
+        };
+        const MARKERS: [&str; 5] = [
+            "not a relay member",
+            "restricted:",
+            "auth-required",
+            "auth rejected",
+            "allowlist",
+        ];
+        let lowered = reason.to_lowercase();
+        MARKERS
+            .iter()
+            .any(|marker| lowered.contains(marker))
+            .then_some(reason.as_str())
+    }
+
+    /// Puts a ready-to-send request on the clipboard. Being told "not a relay
+    /// member" is useless on its own, so hand over both things an administrator
+    /// needs rather than making the user go and look them up.
+    fn copy_identity(&mut self) {
+        let npub = self.npub();
+        let request = format!(
+            "Please add me to the Buzz relay at {}.\n\nMy public key:\n{npub}\n\nTo add me:\n  buzz-admin add-member --pubkey {npub}\n",
+            self.config.relay,
+        );
+        match arboard::Clipboard::new().and_then(|mut c| c.set_text(request)) {
+            Ok(()) => self.toast(
+                ToastKind::Success,
+                "request copied",
+                Some("paste it to whoever runs the relay".to_string()),
+            ),
+            // Without a clipboard, the key itself is still what they need.
+            Err(_) => self.toast(ToastKind::Info, npub, Some("copy this to be added".to_string())),
         }
     }
 
