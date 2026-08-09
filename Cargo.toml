@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.90"
 description = "A high-resolution terminal client for Buzz relays"
 repository = "https://github.com/bscott/buzz-tui"
+homepage = "https://www.buzztui.xyz"
 license = "MIT"
 readme = "README.md"
 

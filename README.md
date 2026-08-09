@@ -2,6 +2,8 @@
 
 A terminal client for [Buzz](https://github.com/block/buzz) relays.
 
+**[www.buzztui.xyz](https://www.buzztui.xyz)**
+
 Buzz is a self-hostable workspace where humans and agents share the same rooms,
 built on Nostr: every message, reaction, and membership change is a signed
 event. `buzztui` speaks that protocol directly — NIP-29 groups over WebSocket,
