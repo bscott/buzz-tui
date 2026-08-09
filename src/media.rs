@@ -15,10 +15,10 @@
 //! two hosts serving `image.png` cannot collide and nothing a relay says ever
 //! reaches the filesystem verbatim.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use image::{DynamicImage, GenericImageView};
@@ -41,17 +41,33 @@ const PREVIOUS_FAILURE: &str = "previously failed to load";
 /// What happened to an image we asked for, delivered back to the event loop.
 pub enum MediaEvent {
     Loaded {
+        epoch: u64,
         url: String,
         image: Box<DynamicImage>,
     },
     Failed {
+        epoch: u64,
         url: String,
         reason: String,
     },
     /// Boxed because a resize request is an order of magnitude larger than the
     /// other variants, and every message on this channel would otherwise pay
     /// for its size.
-    Resized(Box<ResizeRequest>),
+    Resized {
+        epoch: u64,
+        url: String,
+        request: Box<ResizeRequest>,
+    },
+}
+struct Reporter {
+    events: UnboundedSender<MediaEvent>,
+    epoch: u64,
+}
+
+impl Reporter {
+    fn send(&self, event: MediaEvent) {
+        let _ = self.events.send(event);
+    }
 }
 
 pub enum Status<'a> {
@@ -85,16 +101,14 @@ pub struct Media {
     config: MediaConfig,
     cache_dir: PathBuf,
     store: Arc<Store>,
+    /// Incremented when the active community changes so late downloads cannot
+    /// populate the new community's render cache.
+    epoch: u64,
     events: UnboundedSender<MediaEvent>,
     /// Absent when no HTTP client could be built, which leaves inline images
     /// disabled rather than taking the client down.
     client: Option<reqwest::Client>,
     entries: HashMap<String, Entry>,
-    /// URLs whose resize requests are in flight, in the order the requests were
-    /// posted to the event loop. A [`ResizeRequest`] does not carry any public
-    /// identity of its own, so this queue is what lets a completed resize find
-    /// its way back to the right image.
-    pending: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Media {
@@ -124,11 +138,11 @@ impl Media {
             picker,
             config,
             cache_dir,
+            epoch: 0,
             store,
             events,
             client,
             entries: HashMap::new(),
-            pending: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -163,6 +177,12 @@ impl Media {
     pub fn font_size(&self) -> (u16, u16) {
         let size = self.picker.font_size();
         (size.width, size.height)
+    }
+    pub fn switch_cache(&mut self, cache_dir: PathBuf, store: Arc<Store>) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.cache_dir = cache_dir;
+        self.store = store;
+        self.entries.clear();
     }
 
     /// Idempotently begins loading `url`. Safe to call from the render path.
@@ -203,7 +223,10 @@ impl Media {
             self.cache_dir.clone(),
             self.config.max_bytes,
             self.store.clone(),
-            self.events.clone(),
+            Reporter {
+                events: self.events.clone(),
+                epoch: self.epoch,
+            },
         ));
     }
 
@@ -217,7 +240,10 @@ impl Media {
 
     pub fn handle(&mut self, event: MediaEvent) {
         match event {
-            MediaEvent::Loaded { url, image } => {
+            MediaEvent::Loaded { epoch, url, image } => {
+                if epoch != self.epoch {
+                    return;
+                }
                 let (width, height) = image.dimensions();
                 let protocol = self.picker.new_resize_protocol(*image);
 
@@ -225,12 +251,7 @@ impl Media {
                 // forwarding those requests knows, without guessing, which URL
                 // they belong to.
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                spawn(forward_resizes(
-                    rx,
-                    url.clone(),
-                    self.events.clone(),
-                    self.pending.clone(),
-                ));
+                spawn(forward_resizes(rx, url.clone(), epoch, self.events.clone()));
 
                 self.entries.insert(
                     url,
@@ -241,12 +262,20 @@ impl Media {
                     },
                 );
             }
-            MediaEvent::Failed { url, reason } => {
+            MediaEvent::Failed { epoch, url, reason } => {
+                if epoch != self.epoch {
+                    return;
+                }
                 self.entries.insert(url, Entry::Failed(reason));
             }
-            MediaEvent::Resized(request) => {
-                let request = *request;
-                let queued = self.queue().pop_front();
+            MediaEvent::Resized {
+                epoch,
+                url,
+                request,
+            } => {
+                if epoch != self.epoch {
+                    return;
+                }
                 let response = match request.resize_encode() {
                     Ok(response) => response,
                     Err(err) => {
@@ -254,19 +283,10 @@ impl Media {
                         return;
                     }
                 };
-
-                // The queue is normally authoritative: the forwarder enqueues a
-                // URL and posts its event under the same lock, so queue order
-                // and event order agree. The scan is the belt to that braces.
-                let target = queued.or_else(|| self.sole_awaiting());
-                let Some(target) = target else {
-                    tracing::debug!("a resize completed for an image nobody is waiting on");
-                    return;
-                };
-                if let Some(Entry::Ready { protocol, .. }) = self.entries.get_mut(&target)
+                if let Some(Entry::Ready { protocol, .. }) = self.entries.get_mut(&url)
                     && !protocol.update_resized_protocol(response)
                 {
-                    tracing::debug!(url = target, "discarded a stale resize");
+                    tracing::debug!(url, "discarded a stale resize");
                 }
             }
         }
@@ -302,26 +322,6 @@ impl Media {
     /// user scrolls through a long history of images.
     pub fn retain(&mut self, keep: &HashSet<String>) {
         self.entries.retain(|url, _| keep.contains(url));
-        self.queue().retain(|url| keep.contains(url));
-    }
-
-    fn queue(&self) -> std::sync::MutexGuard<'_, VecDeque<String>> {
-        // A poisoned queue means a forwarder panicked between enqueueing and
-        // posting. Losing one resize is not worth taking the interface down.
-        self.pending.lock().unwrap_or_else(|err| err.into_inner())
-    }
-
-    /// The URL of the only image currently without a protocol in hand, if there
-    /// is exactly one. With more than one candidate there is nothing to choose
-    /// between them, and guessing wrong would show the wrong picture.
-    fn sole_awaiting(&self) -> Option<String> {
-        let mut awaiting = self.entries.iter().filter(|(_, entry)| {
-            matches!(entry, Entry::Ready { protocol, .. } if protocol.protocol_type().is_none())
-        });
-        match (awaiting.next(), awaiting.next()) {
-            (Some((url, _)), None) => Some(url.clone()),
-            _ => None,
-        }
     }
 }
 
@@ -433,12 +433,16 @@ async fn load(
     cache_dir: PathBuf,
     max_bytes: u64,
     store: Arc<Store>,
-    events: UnboundedSender<MediaEvent>,
+    reporter: Reporter,
 ) {
     if let Some(path) = cached {
         match tokio::task::spawn_blocking(move || decode_file(&path)).await {
             Ok(Some(image)) => {
-                let _ = events.send(MediaEvent::Loaded { url, image });
+                reporter.send(MediaEvent::Loaded {
+                    epoch: reporter.epoch,
+                    url,
+                    image,
+                });
                 return;
             }
             // A cache file that has been deleted or truncated under us is worth
@@ -450,12 +454,17 @@ async fn load(
 
     if let Err(reason) = fetchable(&url) {
         record(&store, &url, None, 0, true);
-        let _ = events.send(MediaEvent::Failed { url, reason });
+        reporter.send(MediaEvent::Failed {
+            epoch: reporter.epoch,
+            url,
+            reason,
+        });
         return;
     }
 
     let Some(client) = client else {
-        let _ = events.send(MediaEvent::Failed {
+        reporter.send(MediaEvent::Failed {
+            epoch: reporter.epoch,
             url,
             reason: "no http client is available".to_owned(),
         });
@@ -473,20 +482,22 @@ async fn load(
             .await;
             match decoded {
                 Ok(Ok(image)) => MediaEvent::Loaded {
+                    epoch: reporter.epoch,
                     url: url.clone(),
                     image,
                 },
-                Ok(Err(rejection)) => reject(&store, &url, rejection),
+                Ok(Err(rejection)) => reject(&store, &url, rejection, reporter.epoch),
                 Err(err) => MediaEvent::Failed {
+                    epoch: reporter.epoch,
                     url: url.clone(),
                     reason: format!("decoding did not finish: {err}"),
                 },
             }
         }
-        Err(rejection) => reject(&store, &url, rejection),
+        Err(rejection) => reject(&store, &url, rejection, reporter.epoch),
     };
 
-    let _ = events.send(event);
+    reporter.send(event);
 }
 
 /// Downloads the body, refusing anything oversized or obviously not an image
@@ -601,11 +612,12 @@ fn decode_file(path: &Path) -> Option<Box<DynamicImage>> {
     }
 }
 
-fn reject(store: &Store, url: &str, rejection: Rejection) -> MediaEvent {
+fn reject(store: &Store, url: &str, rejection: Rejection, epoch: u64) -> MediaEvent {
     if rejection.permanent {
         record(store, url, None, 0, true);
     }
     MediaEvent::Failed {
+        epoch,
         url: url.to_owned(),
         reason: rejection.reason,
     }
@@ -617,22 +629,23 @@ fn record(store: &Store, url: &str, path: Option<&str>, bytes: u64, failed: bool
     }
 }
 
-/// Forwards this image's resize requests to the event loop.
-///
-/// The enqueue and the post happen under one lock so that, with several images
-/// resizing at once, the order of the queue matches the order of the events.
-/// That correspondence is the only thing tying a completed resize back to the
-/// image it belongs to, since `ResizeRequest` exposes no identity of its own.
+/// Forwards this image's resize requests to the event loop. The URL travels
+/// with the request so concurrent workers never depend on shared queue order.
 async fn forward_resizes(
     mut requests: UnboundedReceiver<ResizeRequest>,
     url: String,
+    epoch: u64,
     events: UnboundedSender<MediaEvent>,
-    pending: Arc<Mutex<VecDeque<String>>>,
 ) {
     while let Some(request) = requests.recv().await {
-        let mut queue = pending.lock().unwrap_or_else(|err| err.into_inner());
-        queue.push_back(url.clone());
-        if events.send(MediaEvent::Resized(Box::new(request))).is_err() {
+        if events
+            .send(MediaEvent::Resized {
+                epoch,
+                url: url.clone(),
+                request: Box::new(request),
+            })
+            .is_err()
+        {
             return;
         }
     }
@@ -786,6 +799,7 @@ mod tests {
 
     fn loaded(media: &mut Media, url: &str) {
         media.handle(MediaEvent::Loaded {
+            epoch: media.epoch,
             url: url.to_owned(),
             image: screenshot(),
         });
@@ -860,10 +874,34 @@ mod tests {
     async fn a_failed_image_occupies_no_rows() {
         let (mut media, _events) = media(ProtocolType::Halfblocks);
         media.handle(MediaEvent::Failed {
+            epoch: media.epoch,
             url: URL.to_owned(),
             reason: "gone".to_owned(),
         });
         assert_eq!(media.rows_for(URL, 40, 16), 0);
+    }
+    #[tokio::test]
+    async fn switching_cache_discards_late_downloads_from_the_previous_community() {
+        let (mut media, _events) = media(ProtocolType::Halfblocks);
+        let previous_epoch = media.epoch;
+        media.switch_cache(
+            std::env::temp_dir().join("buzztui-media-tests-second-community"),
+            Arc::new(Store::scratch().unwrap()),
+        );
+
+        media.handle(MediaEvent::Loaded {
+            epoch: previous_epoch,
+            url: URL.to_owned(),
+            image: screenshot(),
+        });
+        assert_eq!(media.rows_for(URL, 40, 16), 0);
+
+        media.handle(MediaEvent::Loaded {
+            epoch: media.epoch,
+            url: URL.to_owned(),
+            image: screenshot(),
+        });
+        assert_eq!(media.rows_for(URL, 40, 16), 16);
     }
 
     #[test]
@@ -961,7 +999,7 @@ mod tests {
             .await
             .expect("a resize request should reach the event loop")
             .expect("the channel should stay open");
-        assert!(matches!(event, MediaEvent::Resized(_)));
+        assert!(matches!(event, MediaEvent::Resized { .. }));
         media.handle(event);
 
         let Status::Ready(protocol) = media.status(URL) else {
@@ -971,6 +1009,73 @@ mod tests {
             protocol.protocol_type().is_some(),
             "the resize should have handed the protocol back"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_resize_forwarded_after_switch_cannot_complete_a_new_image() {
+        let (mut media, mut events) = media(ProtocolType::Halfblocks);
+        loaded(&mut media, URL);
+        let old_epoch = media.epoch;
+
+        let area = Rect::new(0, 0, 8, 4);
+        let mut buffer = Buffer::empty(area);
+        let Status::Ready(protocol) = media.status(URL) else {
+            panic!("the old image should be ready");
+        };
+        StatefulImage::<ThreadProtocol>::default().render(area, &mut buffer, protocol);
+
+        // This current-thread runtime cannot poll the old forwarder until the
+        // first await below, so its buffered request is deliberately forwarded
+        // only after the cache boundary has moved.
+        media.switch_cache(
+            std::env::temp_dir().join("buzztui-media-tests-next"),
+            Arc::new(Store::in_memory("me").expect("replacement in-memory store")),
+        );
+        let next = "https://other.example/new.png";
+        let new_epoch = media.epoch;
+        loaded(&mut media, next);
+        let Status::Ready(protocol) = media.status(next) else {
+            panic!("the new image should be ready");
+        };
+        StatefulImage::<ThreadProtocol>::default().render(area, &mut buffer, protocol);
+
+        let first = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("a resize should reach the event loop")
+            .expect("the channel should stay open");
+        let second = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("both resizes should reach the event loop")
+            .expect("the channel should stay open");
+        let identifies = |event: &MediaEvent, epoch, expected: &str| {
+            matches!(
+                event,
+                MediaEvent::Resized {
+                    epoch: actual,
+                    url,
+                    ..
+                } if *actual == epoch && url == expected
+            )
+        };
+        assert!(
+            identifies(&first, old_epoch, URL) || identifies(&second, old_epoch, URL),
+            "the old worker must forward its buffered request after the switch"
+        );
+        assert!(
+            identifies(&first, new_epoch, next) || identifies(&second, new_epoch, next),
+            "the new worker must identify its own request"
+        );
+
+        media.handle(first);
+        media.handle(second);
+        let Status::Ready(protocol) = media.status(next) else {
+            panic!("the new image should remain ready");
+        };
+        assert!(
+            protocol.protocol_type().is_some(),
+            "only the current cache's resize should restore its exact protocol"
+        );
+        assert!(matches!(media.status(URL), Status::Loading));
     }
 
     #[test]

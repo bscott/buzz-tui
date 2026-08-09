@@ -11,7 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use nostr::types::RelayUrl;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 /// Directory name used under the configuration root.
 const APP_DIR: &str = "buzztui";
@@ -23,19 +25,16 @@ const CONFIG_HEADER: &str = r#"# buzztui configuration — https://github.com/bs
 # Edit this by hand and reload from inside buzztui with the reload_config
 # binding (ctrl+b R by default), or restart.
 #
-#   relay    websocket address of your community, ws:// or wss://
-#   gateway  http base for media and relay metadata. omit it and the relay's
-#            own host is used, which is right for most deployments. set it
-#            when a gateway or cdn serves media from elsewhere, for example
-#            gateway = "https://media.example.com"
+#   current       name of the community opened at startup
+#   communities  named Buzz communities, each with a websocket relay and an
+#                optional HTTP gateway for media and relay metadata
 "#;
 
 /// Resolved locations of every file buzztui reads or writes.
 ///
-/// The cache is deliberately not a single path. It holds decrypted direct
-/// messages and per-account read state, so each identity gets its own
-/// directory: rotating or importing a key must never hand one account's
-/// private timeline to another.
+/// The cache is deliberately partitioned by both identity and community. It
+/// holds decrypted direct messages and per-community read state; neither may
+/// cross an account or relay boundary.
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub root: PathBuf,
@@ -68,7 +67,6 @@ impl Paths {
         })
     }
 
-    /// The cache directory belonging to one identity.
     fn identity_dir(&self, pubkey: &str) -> PathBuf {
         // A prefix is enough to separate accounts and keeps the path readable;
         // a collision would need a deliberate 64-bit preimage.
@@ -76,12 +74,16 @@ impl Paths {
         self.cache.join(short)
     }
 
-    pub fn db_for(&self, pubkey: &str) -> PathBuf {
-        self.identity_dir(pubkey).join("buzz.db")
+    fn community_dir(&self, pubkey: &str, relay: &str) -> PathBuf {
+        self.identity_dir(pubkey).join(cache_key(relay))
     }
 
-    pub fn media_for(&self, pubkey: &str) -> PathBuf {
-        self.identity_dir(pubkey).join("media")
+    pub fn db_for(&self, pubkey: &str, relay: &str) -> PathBuf {
+        self.community_dir(pubkey, relay).join("buzz.db")
+    }
+
+    pub fn media_for(&self, pubkey: &str, relay: &str) -> PathBuf {
+        self.community_dir(pubkey, relay).join("media")
     }
 
     /// Creates the application directory tree if any part of it is missing.
@@ -95,14 +97,73 @@ impl Paths {
         Ok(())
     }
 
-    /// Creates the per-identity cache, owner-readable only.
-    pub fn ensure_identity(&self, pubkey: &str) -> Result<()> {
+    /// Creates one identity/community cache. Legacy data is deliberately not
+    /// moved here: callers may be opening an ephemeral relay override, while
+    /// only the persisted configuration knows which community owned v0.1.1.
+    pub fn ensure_community(&self, pubkey: &str, relay: &str) -> Result<()> {
         self.ensure()?;
-        let media = self.media_for(pubkey);
+        let identity = self.identity_dir(pubkey);
+        let community = self.community_dir(pubkey, relay);
+        fs::create_dir_all(&identity)
+            .with_context(|| format!("creating {}", identity.display()))?;
+        fs::create_dir_all(&community)
+            .with_context(|| format!("creating {}", community.display()))?;
+        let media = self.media_for(pubkey, relay);
         fs::create_dir_all(&media).with_context(|| format!("creating {}", media.display()))?;
-        restrict(&self.identity_dir(pubkey))?;
+        restrict(&identity)?;
+        restrict(&community)?;
         Ok(())
     }
+
+    /// Assigns every identity-level v0.1.1 cache to the relay from the
+    /// persisted single-community configuration. This runs while loading that
+    /// configuration, before environment or command-line overrides can apply.
+    fn migrate_legacy_caches(&self, relay: &str) -> Result<()> {
+        if relay.trim().is_empty() || !self.cache.exists() {
+            return Ok(());
+        }
+        let entries = fs::read_dir(&self.cache)
+            .with_context(|| format!("reading {}", self.cache.display()))?;
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("reading an entry in {}", self.cache.display()))?;
+            if !entry
+                .file_type()
+                .with_context(|| format!("reading the type of {}", entry.path().display()))?
+                .is_dir()
+            {
+                continue;
+            }
+            let identity = entry.path();
+            let has_legacy_cache = identity.join("buzz.db").exists()
+                || identity.join("buzz.db-wal").exists()
+                || identity.join("buzz.db-shm").exists()
+                || identity.join("media").exists();
+            if !has_legacy_cache {
+                continue;
+            }
+            let community = identity.join(cache_key(relay));
+            fs::create_dir_all(&community)
+                .with_context(|| format!("creating {}", community.display()))?;
+            for name in ["buzz.db", "buzz.db-wal", "buzz.db-shm"] {
+                move_if_unclaimed(&identity.join(name), &community.join(name))?;
+            }
+            move_if_unclaimed(&identity.join("media"), &community.join("media"))?;
+            restrict(&identity)?;
+            restrict(&community)?;
+        }
+        Ok(())
+    }
+}
+
+/// One host-authoritative Buzz community.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Community {
+    pub relay: String,
+    /// HTTP base for media, uploads, and relay metadata. When absent, the
+    /// websocket relay's own host is used.
+    pub gateway: Option<String>,
 }
 
 /// User-facing configuration, persisted as TOML.
@@ -110,13 +171,13 @@ impl Paths {
 #[serde(default, deny_unknown_fields)]
 #[derive(Default)]
 pub struct Config {
-    /// WebSocket URL of the active Buzz relay. One relay is one community.
-    pub relay: String,
-    /// HTTP base for media, uploads, and relay metadata. Most deployments serve
-    /// these from the same host as the relay, so this is normally left unset
-    /// and derived from `relay`. Set it when a gateway sits in front, or when
-    /// media lives on a different host entirely.
-    pub gateway: Option<String>,
+    /// Name of the community opened at startup.
+    pub current: String,
+    /// Human-readable names mapped to their connection details.
+    pub communities: BTreeMap<String, Community>,
+    /// A CLI or environment override is intentionally never persisted.
+    #[serde(skip)]
+    relay_override: Option<Community>,
     pub ui: UiConfig,
     pub media: MediaConfig,
     /// Per-token palette overrides applied on top of the named theme, keyed by
@@ -191,8 +252,21 @@ impl Default for MediaConfig {
     }
 }
 
+/// The v0.1.1 shape, accepted only long enough to rewrite it into the
+/// multi-community format.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacyConfig {
+    relay: String,
+    gateway: Option<String>,
+    ui: UiConfig,
+    media: MediaConfig,
+    theme: BTreeMap<String, String>,
+}
+
 impl Config {
-    /// Loads `config.toml`, writing a commented default file when absent.
+    /// Loads `config.toml`, rewriting the single-community v0.1.1 shape on
+    /// first read.
     pub fn load_or_create(paths: &Paths) -> Result<Self> {
         if !paths.config.exists() {
             paths.ensure()?;
@@ -202,9 +276,42 @@ impl Config {
         }
         let raw = fs::read_to_string(&paths.config)
             .with_context(|| format!("reading {}", paths.config.display()))?;
+        let value: toml::Value =
+            toml::from_str(&raw).with_context(|| format!("parsing {}", paths.config.display()))?;
+        if value.get("relay").is_some() || value.get("gateway").is_some() {
+            let legacy: LegacyConfig = toml::from_str(&raw)
+                .with_context(|| format!("migrating {}", paths.config.display()))?;
+            let mut config = Self {
+                ui: legacy.ui,
+                media: legacy.media,
+                theme: legacy.theme,
+                ..Self::default()
+            };
+            if !legacy.relay.trim().is_empty() {
+                let name = suggested_community_name(&legacy.relay);
+                config.upsert_community(
+                    &name,
+                    Community {
+                        relay: legacy.relay,
+                        gateway: legacy.gateway,
+                    },
+                )?;
+            }
+            config.migrate_legacy_cache(paths)?;
+            config.save(paths)?;
+            return Ok(config);
+        }
         let config: Self =
             toml::from_str(&raw).with_context(|| format!("parsing {}", paths.config.display()))?;
+        config.migrate_legacy_cache(paths)?;
         Ok(config)
+    }
+
+    fn migrate_legacy_cache(&self, paths: &Paths) -> Result<()> {
+        if let Some((_, community)) = self.current_community() {
+            paths.migrate_legacy_caches(&community.relay)?;
+        }
+        Ok(())
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
@@ -216,6 +323,62 @@ impl Config {
         Ok(())
     }
 
+    /// The selected community, with an ephemeral CLI/environment override
+    /// taking precedence without entering the saved community list.
+    pub fn current_community(&self) -> Option<(&str, &Community)> {
+        if let Some(community) = &self.relay_override {
+            return Some(("override", community));
+        }
+        self.communities
+            .get_key_value(&self.current)
+            .map(|(name, community)| (name.as_str(), community))
+    }
+
+    pub fn relay(&self) -> &str {
+        self.current_community()
+            .map_or("", |(_, community)| community.relay.as_str())
+    }
+
+    pub fn has_community(&self) -> bool {
+        self.current_community()
+            .is_some_and(|(_, community)| !community.relay.trim().is_empty())
+    }
+
+    pub fn activate(&mut self, name: &str) -> Result<()> {
+        if !self.communities.contains_key(name) {
+            bail!("unknown community `{name}`");
+        }
+        self.current = name.to_string();
+        self.relay_override = None;
+        Ok(())
+    }
+
+    pub fn upsert_community(&mut self, name: &str, mut community: Community) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("community name cannot be empty");
+        }
+        let relay = RelayUrl::parse(community.relay.trim())
+            .with_context(|| format!("{} is not a ws:// or wss:// URL", community.relay))?;
+        community.relay = canonical_relay_url(&relay);
+        community.gateway = community
+            .gateway
+            .map(|gateway| gateway.trim().trim_end_matches('/').to_string())
+            .filter(|gateway| !gateway.is_empty());
+        self.communities.insert(name.to_string(), community);
+        self.current = name.to_string();
+        self.relay_override = None;
+        Ok(())
+    }
+
+    pub fn override_relay(&mut self, relay: impl Into<String>) {
+        let relay = relay.into();
+        self.relay_override = Some(Community {
+            relay: relay_identity(&relay),
+            gateway: None,
+        });
+    }
+
     /// Applies environment overrides. `BUZZTUI_RELAY` wins over `BUZZ_RELAY_URL`
     /// so that a buzztui-specific setting can override the shared Buzz variable.
     pub fn apply_env(&mut self) {
@@ -223,34 +386,39 @@ impl Config {
             if let Ok(value) = std::env::var(key)
                 && !value.trim().is_empty()
             {
-                self.relay = value.trim().to_string();
+                self.override_relay(value);
                 return;
             }
         }
     }
 
-    /// Whether a community has actually been chosen. The relay stays empty
-    /// until someone says otherwise, so a freshly written configuration can
-    /// never be mistaken for a configured one.
-    pub fn has_community(&self) -> bool {
-        !self.relay.trim().is_empty()
+    pub fn http_origin(&self) -> String {
+        self.current_community()
+            .map_or_else(String::new, |(_, community)| community.http_origin())
     }
 
-    /// The HTTP origin used for Blossom media downloads and NIP-11 metadata:
-    /// the configured gateway when there is one, otherwise the relay's own host.
+    pub fn resolve_media(&self, url: &str) -> String {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            return url.to_string();
+        }
+        format!("{}/{}", self.http_origin(), url.trim_start_matches('/'))
+    }
+}
+
+impl Community {
+    /// The HTTP origin used for Blossom media downloads and NIP-11 metadata.
     pub fn http_origin(&self) -> String {
         if let Some(gateway) = self
             .gateway
             .as_deref()
             .map(str::trim)
-            .filter(|g| !g.is_empty())
+            .filter(|gateway| !gateway.is_empty())
         {
             return gateway.trim_end_matches('/').to_string();
         }
         self.http_origin_from_relay()
     }
 
-    /// The HTTP origin the relay's own host implies, ignoring any gateway.
     pub fn http_origin_from_relay(&self) -> String {
         let relay = self.relay.trim_end_matches('/');
         match relay.split_once("://") {
@@ -259,15 +427,57 @@ impl Config {
             _ => relay.to_string(),
         }
     }
+}
 
-    /// Resolves a possibly relative media path against the relay origin, which
-    /// is how Buzz's Blossom endpoint addresses blobs it hosts itself.
-    pub fn resolve_media(&self, url: &str) -> String {
-        if url.starts_with("http://") || url.starts_with("https://") {
-            return url.to_string();
-        }
-        format!("{}/{}", self.http_origin(), url.trim_start_matches('/'))
+/// A useful initial label that remains stable until the user chooses another.
+pub fn suggested_community_name(relay: &str) -> String {
+    relay
+        .trim()
+        .trim_end_matches('/')
+        .split_once("://")
+        .map_or(relay, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("community")
+        .to_string()
+}
+
+/// Stable identity for a relay boundary. URL parsing canonicalizes the scheme,
+/// host, and default port. Only the authority's implicit root path is folded;
+/// non-root paths retain both case and their trailing slash.
+pub(crate) fn relay_identity(relay: &str) -> String {
+    RelayUrl::parse(relay.trim())
+        .map(|url| canonical_relay_url(&url))
+        .unwrap_or_else(|_| relay.trim().to_string())
+}
+
+fn canonical_relay_url(relay: &RelayUrl) -> String {
+    let url: &Url = relay.into();
+    if url.path() == "/" && url.query().is_none() && url.fragment().is_none() {
+        url.as_str().trim_end_matches('/').to_string()
+    } else {
+        url.as_str().to_string()
     }
+}
+
+fn cache_key(relay: &str) -> String {
+    // FNV-1a is stable across toolchains and needs no heap allocation or crypto
+    // dependency. The database claim below remains the collision backstop.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in relay_identity(relay).bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn move_if_unclaimed(source: &Path, target: &Path) -> Result<()> {
+    if !source.exists() || target.exists() {
+        return Ok(());
+    }
+    fs::rename(source, target)
+        .with_context(|| format!("migrating {} to {}", source.display(), target.display()))
 }
 
 /// Reads the stored secret key, preferring `BUZZTUI_NSEC` when it is set.
@@ -395,13 +605,39 @@ mod tests {
 
     #[test]
     fn http_origin_maps_websocket_schemes() {
-        let mut config = Config {
-            relay: "ws://localhost:3000".to_string(),
-            ..Default::default()
-        };
+        let mut config = Config::default();
+        config
+            .upsert_community(
+                "local",
+                Community {
+                    relay: "ws://localhost:3000".to_string(),
+                    gateway: None,
+                },
+            )
+            .unwrap();
         assert_eq!(config.http_origin(), "http://localhost:3000");
-        config.relay = "wss://buzz.example.com/".to_string();
+        config.communities.get_mut("local").unwrap().relay = "wss://buzz.example.com/".to_string();
         assert_eq!(config.http_origin(), "https://buzz.example.com");
+    }
+
+    #[test]
+    fn relay_identity_only_folds_the_authority_root_path() {
+        assert_eq!(
+            relay_identity("wss://EXAMPLE.com"),
+            relay_identity("wss://example.com/")
+        );
+        assert_eq!(
+            relay_identity("wss://EXAMPLE.com/Foo/"),
+            relay_identity("wss://example.com/Foo/")
+        );
+        assert_ne!(
+            relay_identity("wss://example.com/Foo"),
+            relay_identity("wss://example.com/Foo/")
+        );
+        assert_ne!(
+            relay_identity("wss://example.com/Foo"),
+            relay_identity("wss://example.com/foo")
+        );
     }
 
     #[test]
@@ -409,8 +645,139 @@ mod tests {
         let config = Config::default();
         let text = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.relay, config.relay);
+        assert_eq!(parsed.current, config.current);
+        assert_eq!(parsed.communities, config.communities);
         assert_eq!(parsed.ui.sidebar_width, config.ui.sidebar_width);
         assert_eq!(parsed.media.max_rows, config.media.max_rows);
+    }
+    fn temporary_paths(label: &str) -> Paths {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "buzztui-config-{label}-{}-{serial}",
+            std::process::id()
+        ));
+        Paths {
+            config: root.join("config.toml"),
+            secret: root.join("secret.key"),
+            cache: root.join("cache"),
+            log: root.join("buzztui.log"),
+            root,
+        }
+    }
+
+    #[test]
+    fn legacy_single_relay_config_migrates_without_losing_settings() {
+        let paths = temporary_paths("legacy");
+        fs::create_dir_all(&paths.root).unwrap();
+        fs::write(
+            &paths.config,
+            r#"
+relay = "wss://one.example"
+gateway = "https://media.example"
+
+[ui]
+sidebar_width = 41
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_or_create(&paths).unwrap();
+        let (name, community) = config.current_community().unwrap();
+        assert_eq!(name, "one.example");
+        assert_eq!(community.relay, "wss://one.example");
+        assert_eq!(community.gateway.as_deref(), Some("https://media.example"));
+        assert_eq!(config.ui.sidebar_width, 41);
+
+        let saved: toml::Value =
+            toml::from_str(&fs::read_to_string(&paths.config).unwrap()).unwrap();
+        assert!(saved.get("relay").is_none());
+        assert!(saved.get("communities").is_some());
+        assert_eq!(
+            Config::load_or_create(&paths).unwrap().current,
+            "one.example"
+        );
+        fs::remove_dir_all(&paths.root).ok();
+    }
+
+    #[test]
+    fn legacy_identity_cache_moves_into_the_selected_community() {
+        let paths = temporary_paths("cache");
+        let pubkey = "a".repeat(64);
+        let legacy = paths.identity_dir(&pubkey);
+        fs::create_dir_all(legacy.join("media")).unwrap();
+        fs::write(legacy.join("buzz.db"), b"database").unwrap();
+        fs::write(legacy.join("media").join("image.png"), b"image").unwrap();
+
+        paths.migrate_legacy_caches("wss://one.example").unwrap();
+
+        assert_eq!(
+            fs::read(paths.db_for(&pubkey, "wss://one.example")).unwrap(),
+            b"database"
+        );
+        assert_eq!(
+            fs::read(
+                paths
+                    .media_for(&pubkey, "wss://one.example")
+                    .join("image.png")
+            )
+            .unwrap(),
+            b"image"
+        );
+        assert!(!legacy.join("buzz.db").exists());
+        assert!(!legacy.join("media").exists());
+        fs::remove_dir_all(&paths.root).ok();
+    }
+
+    #[test]
+    fn first_launch_override_cannot_claim_the_legacy_community_cache() {
+        let paths = temporary_paths("override-migration");
+        let pubkey = "b".repeat(64);
+        let legacy = paths.identity_dir(&pubkey);
+        fs::create_dir_all(&legacy).unwrap();
+        let connection = rusqlite::Connection::open(legacy.join("buzz.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO meta (key, value) VALUES
+                    ('owner', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
+                    ('legacy_marker', 'community one history');",
+            )
+            .unwrap();
+        drop(connection);
+        fs::write(
+            &paths.config,
+            r#"relay = "wss://one.example"
+"#,
+        )
+        .unwrap();
+
+        // Loading performs the assignment from the persisted v0.1.1 relay
+        // before an environment or CLI override can replace the runtime relay.
+        let mut config = Config::load_or_create(&paths).unwrap();
+        config.override_relay("wss://two.example");
+        paths.ensure_community(&pubkey, config.relay()).unwrap();
+
+        let original = paths.db_for(&pubkey, "wss://one.example");
+        let overridden = paths.db_for(&pubkey, "wss://two.example");
+        assert!(original.exists());
+        assert!(!overridden.exists());
+        let connection = rusqlite::Connection::open(&original).unwrap();
+        let marker: String = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'legacy_marker'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, "community one history");
+        drop(connection);
+
+        assert!(crate::store::Store::open(&original, &pubkey, "wss://one.example").is_ok());
+        assert!(crate::store::Store::open(&original, &pubkey, "wss://two.example").is_err());
+        fs::remove_dir_all(&paths.root).ok();
     }
 }

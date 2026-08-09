@@ -135,6 +135,7 @@ pub enum Action {
     MarkRead,
     MarkAllRead,
     OpenSwitcher,
+    OpenCommunitySwitcher,
     OpenSearch,
     OpenMembers,
     OpenProfile,
@@ -482,6 +483,12 @@ const SPECS: &[Spec] = &[
         "switcher",
         Group::Channels,
         "jump to a channel",
+    ),
+    spec(
+        Action::OpenCommunitySwitcher,
+        "community_switcher",
+        Group::Channels,
+        "switch community",
     ),
     spec(
         Action::OpenSearch,
@@ -1327,6 +1334,7 @@ const DEFAULTS: &[(Scope, &[&str], Action)] = &[
     // ---- leader: everything infrequent ------------------------------------
     (Scope::Leader, &["leader+?"], Action::OpenHelp),
     (Scope::Leader, &["leader+k"], Action::OpenSwitcher),
+    (Scope::Leader, &["leader+w"], Action::OpenCommunitySwitcher),
     (Scope::Leader, &["leader+/"], Action::OpenSearch),
     (Scope::Leader, &["leader+:"], Action::OpenCommand),
     (Scope::Leader, &["leader+c"], Action::CreateChannel),

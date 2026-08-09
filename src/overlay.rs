@@ -30,6 +30,7 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Submission {
     OpenChannel(String),
+    SwitchCommunity(String),
     React(String),
     JumpToMessage { channel: String, id: String },
     Prompt { kind: PromptKind, value: String },
@@ -52,7 +53,7 @@ impl PromptKind {
             PromptKind::CreateChannel => "create channel",
             PromptKind::JoinChannel => "join channel",
             PromptKind::DirectMessage => "direct message",
-            PromptKind::SetRelay => "switch relay",
+            PromptKind::SetRelay => "add community",
             PromptKind::SetTopic => "set topic",
         }
     }
@@ -62,7 +63,7 @@ impl PromptKind {
             PromptKind::CreateChannel => "channel name",
             PromptKind::JoinChannel => "channel uuid",
             PromptKind::DirectMessage => "npub or hex pubkey",
-            PromptKind::SetRelay => "ws://host:port",
+            PromptKind::SetRelay => "name wss://relay [https://gateway]",
             PromptKind::SetTopic => "what this channel is for",
         }
     }
@@ -223,6 +224,7 @@ fn step(cursor: usize, len: usize, delta: isize) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerKind {
     Channel,
+    Community,
     Emoji,
 }
 
@@ -308,6 +310,7 @@ impl Picker {
                 return match self.selection() {
                     Some(item) => Outcome::Submit(match self.kind {
                         PickerKind::Channel => Submission::OpenChannel(item.id.clone()),
+                        PickerKind::Community => Submission::SwitchCommunity(item.id.clone()),
                         PickerKind::Emoji => Submission::React(item.id.clone()),
                     }),
                     // Submitting an empty list would silently do nothing, which
@@ -436,14 +439,6 @@ impl Prompt {
         Self {
             kind,
             value: String::new(),
-            error: None,
-        }
-    }
-
-    pub fn with_value(kind: PromptKind, value: impl Into<String>) -> Self {
-        Self {
-            kind,
-            value: value.into(),
             error: None,
         }
     }

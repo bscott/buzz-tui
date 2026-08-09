@@ -99,7 +99,7 @@ fn main() -> Result<()> {
     let mut config = Config::load_or_create(&paths)?;
     config.apply_env();
     if let Some(relay) = cli.relay.clone() {
-        config.relay = relay;
+        config.override_relay(relay);
     }
 
     match cli.command {
@@ -125,10 +125,15 @@ fn main() -> Result<()> {
             println!("cache   {}", paths.cache.display());
             if let Ok(Some(secret)) = config::load_secret(&paths)
                 && let Ok(keys) = Keys::parse(&secret)
+                && let Some((name, community)) = config.current_community()
             {
                 let me = keys.public_key().to_hex();
-                println!("data    {}", paths.db_for(&me).display());
-                println!("media   {}", paths.media_for(&me).display());
+                println!("current {name}");
+                println!("data    {}", paths.db_for(&me, &community.relay).display());
+                println!(
+                    "media   {}",
+                    paths.media_for(&me, &community.relay).display()
+                );
             }
             println!("log     {}", paths.log.display());
             Ok(())
@@ -280,9 +285,15 @@ fn print_keys(paths: &Paths) {
 
 fn doctor(paths: &Paths, config: &Config) -> Result<()> {
     let mut problems = 0usize;
-    println!("relay      {}", config.relay);
-    if nostr::types::RelayUrl::parse(&config.relay).is_err() {
-        println!("           ! not a ws:// or wss:// url");
+    if let Some((name, community)) = config.current_community() {
+        println!("community  {name}");
+        println!("relay      {}", community.relay);
+        if nostr::types::RelayUrl::parse(&community.relay).is_err() {
+            println!("           ! not a ws:// or wss:// url");
+            problems += 1;
+        }
+    } else {
+        println!("community  ! none configured");
         problems += 1;
     }
 
@@ -313,14 +324,18 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
     {
         Some(keys) => {
             let me = keys.public_key().to_hex();
-            let db = paths.db_for(&me);
-            paths.ensure_identity(&me)?;
-            match Store::open(&db, &me) {
-                Ok(_) => println!("database   {}", db.display()),
-                Err(err) => {
-                    println!("database   ! {err}");
-                    problems += 1;
+            if let Some((_, community)) = config.current_community() {
+                let db = paths.db_for(&me, &community.relay);
+                paths.ensure_community(&me, &community.relay)?;
+                match Store::open(&db, &me, &community.relay) {
+                    Ok(_) => println!("database   {}", db.display()),
+                    Err(err) => {
+                        println!("database   ! {err}");
+                        problems += 1;
+                    }
                 }
+            } else {
+                println!("database   ! no community configured");
             }
         }
         // Opening a cache under a placeholder pubkey would stamp it with an
@@ -380,14 +395,22 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
 
     let (keypair, generated) = load_or_create_identity(&paths)?;
     let me = keypair.public_key().to_hex();
-    paths.ensure_identity(&me)?;
-    let store = Arc::new(Store::open(&paths.db_for(&me), &me)?);
+    let (_, community) = config
+        .current_community()
+        .context("no current community; run `buzztui setup`")?;
+    let relay_url = community.relay.clone();
+    paths.ensure_community(&me, &relay_url)?;
+    let store = Arc::new(Store::open(
+        &paths.db_for(&me, &relay_url),
+        &me,
+        &relay_url,
+    )?);
 
     let (file, mut diagnostics) = KeyFile::load(&paths.root.join("keys.toml"));
     let keymap = Keymap::with_overrides(file);
     diagnostics.extend(keymap.diagnostics.iter().cloned());
 
-    let (relay, mut relay_updates) = net::spawn(config.relay.clone(), keypair.clone());
+    let (relay, mut relay_updates) = net::spawn(relay_url.clone(), keypair.clone());
     let mut update_rx = update::spawn();
     let (media_tx, mut media_rx) = mpsc::unbounded_channel::<MediaEvent>();
 
@@ -401,7 +424,7 @@ async fn run(config: Config, paths: Paths) -> Result<()> {
     let media = Media::new(
         picker,
         config.media.clone(),
-        paths.media_for(&me),
+        paths.media_for(&me, &relay_url),
         Arc::clone(&store),
         media_tx,
     );

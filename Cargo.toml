@@ -1,6 +1,6 @@
 [package]
 name = "buzz-tui"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.90"
 description = "A high-resolution terminal client for Buzz relays"
@@ -37,6 +37,7 @@ nostr = { version = "0.45", default-features = false, features = [
     "nip44",
     "nip59",
 ] }
+url = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

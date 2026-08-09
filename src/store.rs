@@ -17,11 +17,12 @@ use nostr::event::Event;
 use parking_lot::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+use crate::config::relay_identity;
 use crate::model::{Channel, ChannelKind, Delivery, Message, Profile, Reaction};
 use crate::proto::{self, kinds};
 
 /// Current schema version. Bumping this requires a matching migration arm.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Prefix marking a synthetic direct-message conversation.
 pub const DIRECT_PREFIX: &str = "dm:";
@@ -98,27 +99,29 @@ pub struct Store {
     conn: Mutex<Connection>,
     /// Our own pubkey, needed to resolve "did I react" and "was I mentioned".
     me: String,
+    /// Host-authoritative community owning every event in this database.
+    community: String,
 }
 
 impl Store {
-    pub fn open(path: &Path, me: &str) -> Result<Self> {
+    pub fn open(path: &Path, me: &str, community: &str) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("opening database {}", path.display()))?;
-        Self::from_connection(conn, me)
+        Self::from_connection(conn, me, community)
     }
 
     #[cfg(test)]
     pub fn in_memory(me: &str) -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?, me)
+        Self::from_connection(Connection::open_in_memory()?, me, "test-community")
     }
 
     /// A throwaway cache with no identity attached, for code paths that need a
     /// store to exist but must never touch a real account's data.
     pub fn scratch() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?, "")
+        Self::from_connection(Connection::open_in_memory()?, "", "")
     }
 
-    fn from_connection(conn: Connection, me: &str) -> Result<Self> {
+    fn from_connection(conn: Connection, me: &str, community: &str) -> Result<Self> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -131,41 +134,40 @@ impl Store {
         let store = Self {
             conn: Mutex::new(conn),
             me: me.to_string(),
+            community: relay_identity(community),
         };
         store.migrate()?;
         store.claim()?;
         Ok(store)
     }
 
-    /// Records which identity owns this cache, and refuses to open one that
-    /// belongs to someone else.
-    ///
-    /// The cache holds decrypted direct messages. Paths already separate
-    /// identities, but a copied or restored file would slip past that, and
-    /// silently showing one account another's private timeline is the worst
-    /// failure this program could have.
+    /// Records both security boundaries this cache belongs to. Paths already
+    /// separate them, but copied or restored files must fail closed too.
     fn claim(&self) -> Result<()> {
         let conn = self.lock();
-        let owner: Option<String> = conn
-            .query_row("SELECT value FROM meta WHERE key = 'owner'", [], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        match owner {
-            Some(owner) if owner != self.me => bail!(
+        let owner = claim_value(&conn, "owner", &self.me)?;
+        if owner != self.me {
+            bail!(
                 "this cache belongs to {}, not {}; refusing to open it",
                 proto::short_pubkey(&owner),
                 proto::short_pubkey(&self.me)
-            ),
-            Some(_) => Ok(()),
-            None => {
-                conn.execute(
-                    "INSERT INTO meta (key, value) VALUES ('owner', ?1)",
-                    params![self.me],
-                )?;
-                Ok(())
-            }
+            );
         }
+        let recorded = claim_value(&conn, "community", &self.community)?;
+        let community = relay_identity(&recorded);
+        if community != self.community {
+            bail!(
+                "this cache belongs to community `{recorded}`, not `{}`; refusing to open it",
+                self.community
+            );
+        }
+        if recorded != community {
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'community'",
+                params![community],
+            )?;
+        }
+        Ok(())
     }
 
     fn migrate(&self) -> Result<()> {
@@ -234,9 +236,11 @@ impl Store {
             );
 
             CREATE TABLE IF NOT EXISTS members (
-                channel TEXT NOT NULL,
-                pubkey  TEXT NOT NULL,
-                role    TEXT NOT NULL DEFAULT 'member',
+                channel    TEXT NOT NULL,
+                pubkey     TEXT NOT NULL,
+                role       TEXT NOT NULL DEFAULT 'member',
+                listed     INTEGER NOT NULL DEFAULT 0,
+                admin_role TEXT,
                 PRIMARY KEY (channel, pubkey)
             );
 
@@ -266,7 +270,26 @@ impl Store {
         )
         .context("creating schema")?;
 
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        if version == 1 {
+            conn.execute_batch(
+                r#"
+                BEGIN IMMEDIATE;
+                ALTER TABLE members ADD COLUMN listed INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE members ADD COLUMN admin_role TEXT;
+                UPDATE members
+                   SET listed = 1,
+                       admin_role = CASE
+                           WHEN role IN ('owner', 'admin') THEN role
+                           ELSE NULL
+                       END;
+                PRAGMA user_version = 2;
+                COMMIT;
+                "#,
+            )
+            .context("migrating member roster snapshots")?;
+        } else {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(())
     }
 
@@ -490,29 +513,63 @@ impl Store {
             return Ok(Ingested::Ignored);
         };
         let roster = proto::roster_from_event(event);
+        let kind = event.kind.as_u16();
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         ensure_channel_row(&tx, &channel)?;
 
-        if event.kind.as_u16() == kinds::GROUP_MEMBERS {
-            // Kind:39002 is the complete roster, so it replaces what we hold.
-            // It carries no roles, though, so preserve the ones kind:39001 set.
-            tx.execute(
-                "DELETE FROM members WHERE channel = ?1 AND role = 'member'",
-                params![channel],
-            )?;
-        }
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO members (channel, pubkey, role) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(channel, pubkey) DO UPDATE SET role = excluded.role
-                 WHERE excluded.role <> 'member' OR members.role = 'member'",
-            )?;
-            for member in &roster {
-                stmt.execute(params![channel, member.pubkey, member.role.as_str()])?;
+        match kind {
+            kinds::GROUP_ADMINS => {
+                // A 39001 event replaces the complete role snapshot. Members
+                // omitted from it are demoted if 39002 still lists them, and
+                // disappear if their only provenance was the old admin list.
+                tx.execute(
+                    "UPDATE members
+                        SET role = 'member', admin_role = NULL
+                      WHERE channel = ?1",
+                    params![channel],
+                )?;
+                {
+                    let mut stmt = tx.prepare(
+                        "INSERT INTO members
+                            (channel, pubkey, role, listed, admin_role)
+                         VALUES (?1, ?2, ?3, 0, ?3)
+                         ON CONFLICT(channel, pubkey) DO UPDATE SET
+                            role = excluded.role,
+                            admin_role = excluded.admin_role",
+                    )?;
+                    for member in &roster {
+                        stmt.execute(params![channel, member.pubkey, member.role.as_str()])?;
+                    }
+                }
+                tx.execute(
+                    "DELETE FROM members
+                      WHERE channel = ?1 AND listed = 0 AND admin_role IS NULL",
+                    params![channel],
+                )?;
             }
+            kinds::GROUP_MEMBERS => {
+                // NIP-29 permits 39002 to expose only a subset. Treat every
+                // entry as positive membership evidence, never an exhaustive
+                // snapshot; removals arrive through authoritative events.
+                let mut stmt = tx.prepare(
+                    "INSERT INTO members
+                        (channel, pubkey, role, listed, admin_role)
+                     VALUES (?1, ?2, 'member', 1, NULL)
+                     ON CONFLICT(channel, pubkey) DO UPDATE SET
+                        listed = 1,
+                        role = COALESCE(members.admin_role, 'member')",
+                )?;
+                for member in &roster {
+                    stmt.execute(params![channel, member.pubkey])?;
+                }
+            }
+            _ => return Ok(Ingested::Ignored),
         }
-        if roster.iter().any(|m| m.pubkey == self.me) {
+
+        if roster.iter().any(|member| member.pubkey == self.me) {
+            // Absence from a partial 39002 list says nothing. Only an explicit
+            // membership-removal event may mark this identity as having left.
             tx.execute(
                 "UPDATE channels SET joined = 1 WHERE id = ?1",
                 params![channel],
@@ -1020,6 +1077,25 @@ impl Store {
     }
 }
 
+/// Claims one cache boundary on first open and returns its recorded owner.
+fn claim_value(conn: &Connection, key: &str, initial: &str) -> Result<String> {
+    if let Some(value) = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?
+    {
+        return Ok(value);
+    }
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params![key, initial],
+    )?;
+    Ok(initial.to_string())
+}
+
 /// Creates a placeholder conversation row so that messages arriving before
 /// their kind:39000 metadata still have somewhere to live.
 fn ensure_channel_row(conn: &Connection, channel: &str) -> Result<()> {
@@ -1176,7 +1252,7 @@ mod tests {
 
         // Alice reads a direct message into her cache.
         {
-            let store = Store::open(&path, &alice_hex).unwrap();
+            let store = Store::open(&path, &alice_hex, "wss://one.example").unwrap();
             let rumor = Rumor {
                 id: &"d".repeat(64),
                 author: &bob.public_key().to_hex(),
@@ -1192,17 +1268,95 @@ mod tests {
         }
 
         // Reopening as Alice is fine.
-        assert!(Store::open(&path, &alice_hex).is_ok());
+        assert!(Store::open(&path, &alice_hex, "wss://one.example").is_ok());
 
         // Opening the same file as Bob must fail rather than hand over her
         // decrypted timeline.
-        let err = match Store::open(&path, &bob.public_key().to_hex()) {
+        let err = match Store::open(&path, &bob.public_key().to_hex(), "wss://one.example") {
             Ok(_) => panic!("a foreign identity must not open this cache"),
             Err(err) => err.to_string(),
         };
         assert!(err.contains("belongs to"), "{err}");
 
+        let err = match Store::open(&path, &alice_hex, "wss://two.example") {
+            Ok(_) => panic!("a foreign community must not open this cache"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("community"), "{err}");
+
         std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn relay_claims_fold_root_slashes_without_folding_endpoint_paths() {
+        let dir = std::env::temp_dir().join(format!("buzztui-relay-claim-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let keys = Keys::generate();
+        let me = keys.public_key().to_hex();
+
+        let root = dir.join("root.db");
+        assert!(Store::open(&root, &me, "wss://EXAMPLE.com").is_ok());
+        assert!(Store::open(&root, &me, "wss://example.com/").is_ok());
+
+        let endpoint = dir.join("endpoint.db");
+        assert!(Store::open(&endpoint, &me, "wss://EXAMPLE.com/Foo/").is_ok());
+        assert!(Store::open(&endpoint, &me, "wss://example.com/Foo/").is_ok());
+        for distinct in ["wss://example.com/Foo", "wss://example.com/foo/"] {
+            let err = match Store::open(&endpoint, &me, distinct) {
+                Ok(_) => panic!("case and trailing slashes in endpoint paths must be distinct"),
+                Err(err) => err.to_string(),
+            };
+            assert!(err.contains("community"), "{err}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn version_one_member_rows_migrate_into_replaceable_snapshots() {
+        let dir =
+            std::env::temp_dir().join(format!("buzztui-roster-migration-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("buzz.db");
+        let old_admin = "a".repeat(64);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE members (
+                channel TEXT NOT NULL,
+                pubkey  TEXT NOT NULL,
+                role    TEXT NOT NULL DEFAULT 'member',
+                PRIMARY KEY (channel, pubkey)
+             );
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO members (channel, pubkey, role) VALUES ('room', ?1, 'admin')",
+            params![old_admin],
+        )
+        .unwrap();
+        drop(conn);
+
+        let keys = Keys::generate();
+        let store = Store::open(&path, &keys.public_key().to_hex(), "wss://one.example").unwrap();
+        assert_eq!(
+            store.members("room").unwrap(),
+            vec![(old_admin.clone(), proto::Role::Admin)]
+        );
+
+        let no_admins = EventBuilder::new(Kind::from_u16(kinds::GROUP_ADMINS), "")
+            .tag(Tag::parse(["d", "room"]).unwrap())
+            .finalize(&keys)
+            .unwrap();
+        store.ingest(&no_admins).unwrap();
+        assert_eq!(
+            store.members("room").unwrap(),
+            vec![(old_admin, proto::Role::Member)]
+        );
+
+        drop(store);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1218,10 +1372,39 @@ mod tests {
         };
         let alice = "a".repeat(64);
         let bob = "b".repeat(64);
-        assert_ne!(paths.db_for(&alice), paths.db_for(&bob));
-        assert_ne!(paths.media_for(&alice), paths.media_for(&bob));
-        // And the same identity is stable across calls.
-        assert_eq!(paths.db_for(&alice), paths.db_for(&alice));
+        assert_ne!(
+            paths.db_for(&alice, "wss://one.example"),
+            paths.db_for(&bob, "wss://one.example")
+        );
+        assert_ne!(
+            paths.media_for(&alice, "wss://one.example"),
+            paths.media_for(&bob, "wss://one.example")
+        );
+        assert_ne!(
+            paths.db_for(&alice, "wss://one.example"),
+            paths.db_for(&alice, "wss://two.example")
+        );
+        assert_ne!(
+            paths.db_for(&alice, "wss://example.com/Foo"),
+            paths.db_for(&alice, "wss://example.com/foo")
+        );
+        assert_ne!(
+            paths.db_for(&alice, "wss://example.com/Foo"),
+            paths.db_for(&alice, "wss://example.com/Foo/")
+        );
+        assert_eq!(
+            paths.db_for(&alice, "wss://EXAMPLE.com/Foo/"),
+            paths.db_for(&alice, "wss://example.com/Foo/")
+        );
+        assert_eq!(
+            paths.db_for(&alice, "wss://EXAMPLE.com"),
+            paths.db_for(&alice, "wss://example.com/")
+        );
+        // The same identity and community are stable across calls.
+        assert_eq!(
+            paths.db_for(&alice, "wss://one.example"),
+            paths.db_for(&alice, "wss://one.example")
+        );
     }
 
     #[test]
@@ -1590,15 +1773,17 @@ mod tests {
     }
 
     #[test]
-    fn a_full_member_roster_does_not_demote_known_admins() {
+    fn replacement_admin_roster_demotes_members_and_drops_admin_only_entries() {
         let me = Keys::generate();
         let admin = Keys::generate().public_key().to_hex();
+        let orphan = Keys::generate().public_key().to_hex();
         let store = store_with(&me);
 
         let admins = EventBuilder::new(Kind::from_u16(kinds::GROUP_ADMINS), "")
             .tags([
                 Tag::parse(["d", "room"]).unwrap(),
                 Tag::parse(["p", &admin, "admin"]).unwrap(),
+                Tag::parse(["p", &orphan, "admin"]).unwrap(),
             ])
             .finalize(&me)
             .unwrap();
@@ -1614,8 +1799,77 @@ mod tests {
             .unwrap();
         store.ingest(&roster).unwrap();
 
+        let no_admins = EventBuilder::new(Kind::from_u16(kinds::GROUP_ADMINS), "")
+            .tag(Tag::parse(["d", "room"]).unwrap())
+            .finalize(&me)
+            .unwrap();
+        store.ingest(&no_admins).unwrap();
         let members = store.members("room").unwrap();
         assert_eq!(members.len(), 2);
-        assert_eq!(members[0].1, proto::Role::Admin);
+        assert_eq!(
+            members
+                .iter()
+                .find(|(pubkey, _)| pubkey == &admin)
+                .map(|(_, role)| *role),
+            Some(proto::Role::Member)
+        );
+        assert!(!members.iter().any(|(pubkey, _)| pubkey == &orphan));
+    }
+
+    #[test]
+    fn partial_member_roster_is_additive_and_cannot_mark_us_left() {
+        let me = Keys::generate();
+        let admin = Keys::generate().public_key().to_hex();
+        let member = Keys::generate().public_key().to_hex();
+        let store = store_with(&me);
+
+        let admins = EventBuilder::new(Kind::from_u16(kinds::GROUP_ADMINS), "")
+            .tags([
+                Tag::parse(["d", "room"]).unwrap(),
+                Tag::parse(["p", &admin, "moderator"]).unwrap(),
+            ])
+            .finalize(&me)
+            .unwrap();
+        store.ingest(&admins).unwrap();
+        let observed = EventBuilder::new(Kind::from_u16(kinds::GROUP_MEMBERS), "")
+            .tags([
+                Tag::parse(["d", "room"]).unwrap(),
+                Tag::parse(["p", &me.public_key().to_hex()]).unwrap(),
+                Tag::parse(["p", &admin]).unwrap(),
+                Tag::parse(["p", &member]).unwrap(),
+            ])
+            .finalize(&me)
+            .unwrap();
+        store.ingest(&observed).unwrap();
+
+        let partial = EventBuilder::new(Kind::from_u16(kinds::GROUP_MEMBERS), "")
+            .tags([
+                Tag::parse(["d", "room"]).unwrap(),
+                Tag::parse(["p", &member]).unwrap(),
+            ])
+            .finalize(&me)
+            .unwrap();
+        store.ingest(&partial).unwrap();
+
+        let members = store.members("room").unwrap();
+        assert_eq!(members.len(), 3);
+        assert_eq!(
+            members
+                .iter()
+                .find(|(pubkey, _)| pubkey == &admin)
+                .map(|(_, role)| *role),
+            Some(proto::Role::Admin)
+        );
+        assert!(store.channels().unwrap()[0].joined);
+
+        let removed = EventBuilder::new(Kind::from_u16(kinds::MEMBER_REMOVED), "")
+            .tags([
+                Tag::parse(["h", "room"]).unwrap(),
+                Tag::parse(["p", &me.public_key().to_hex()]).unwrap(),
+            ])
+            .finalize(&me)
+            .unwrap();
+        store.ingest(&removed).unwrap();
+        assert!(!store.channels().unwrap()[0].joined);
     }
 }

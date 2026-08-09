@@ -48,6 +48,8 @@ it is read from your own keymap.</sub>
 
 - **Channels, threads, and direct messages.** NIP-29 groups with NIP-10
   threading, and NIP-17 gift-wrapped DMs that never leave the relay in plaintext.
+- **Multiple communities.** Keep several named Buzz relays under one identity
+  and switch in place; every community has an isolated SQLite and media cache.
 - **Works offline.** Every event is cached in SQLite, so the timeline is on
   screen before the socket finishes its handshake. Messages composed while
   disconnected are queued and published on reconnect.
@@ -98,13 +100,14 @@ buzztui
 ```
 
 The first run asks for two things: the community you are joining, and the
-identity to join it with. The community is a relay address — `wss://…`, or just
-a hostname, which is resolved for you and confirmed by reading the relay's
-NIP-11 document back. The identity is either a new key or one you already have,
-typed at a hidden prompt.
+identity to join it with. Give the community a name and a relay address —
+`wss://…`, or just a hostname, which is resolved for you and confirmed by
+reading the relay's NIP-11 document back. The identity is either a new key or
+one you already have, typed at a hidden prompt.
 
-Re-run it any time with `buzztui setup`. It keeps your existing key by default;
-replacing one means typing `replace` in full, because there is no recovery.
+Re-run setup to add another named community. It keeps your existing key by
+default; replacing one means typing `replace` in full, because there is no
+recovery. Inside buzztui, `ctrl+b w` opens the community switcher.
 
 Most relays admit only keys their operator has added. If yours refuses you,
 buzztui says so plainly, and `ctrl+b y` copies a request — your public key and
@@ -135,26 +138,30 @@ Everything lives in `~/.config/buzztui`, or `$BUZZTUI_HOME` when set.
 
 | Path | Contents |
 |---|---|
-| `config.toml` | Relay, interface, and media settings |
+| `config.toml` | Named communities, interface, and media settings |
 | `keys.toml` | Your keybinding overrides — optional |
 | `secret.key` | Your identity, written `0600` |
-| `cache/<pubkey>/buzz.db` | Cached events, channels, profiles, and read state |
-| `cache/<pubkey>/media/` | Downloaded images |
+| `cache/<pubkey>/<community>/buzz.db` | That community's events and read state |
+| `cache/<pubkey>/<community>/media/` | That community's downloaded images |
 | `buzztui.log` | Diagnostics; set `BUZZTUI_LOG=buzztui=debug` for more |
 
-The cache is per identity, and each database records which key owns it and
-refuses to open under another. Decrypted direct messages live there, so
-switching keys must never hand one account's private timeline to the next.
+Caches are isolated by identity and relay. Each database records both owners
+and refuses to open under another. Decrypted direct messages live there, so
+switching keys or communities cannot hand one private timeline to the next.
+The v0.1.1 single-relay config and cache layout migrate automatically.
 
 Your secret key is your account. Back up `secret.key`; there is no recovery.
 
 ## Configuration
 
-`config.toml`, with the defaults shown:
+`config.toml`, with one community and the interface defaults shown:
 
 ```toml
-relay = "ws://localhost:3000"
+current = "local"
 
+[communities.local]
+relay = "ws://localhost:3000"
+# gateway = "https://buzz.example.com" # only when media uses another origin
 [ui]
 sidebar_width = 26
 theme = "buzz"          # buzz | tokyo-night | gruvbox | paper | terminal
@@ -200,6 +207,7 @@ The essentials:
 | `n` `p` `N` `P` | Next or previous channel, or unread channel |
 | `g g` `G` `g u` | Oldest, newest, first unread |
 | `ctrl+k` | Jump to a channel |
+| `ctrl+b w` | Switch community |
 | `ctrl+f` / `/` | Search |
 | `f1` / `?` | Every binding, searchable |
 | `ctrl+b c` `ctrl+b j` `ctrl+b d` | Create, join, or open a direct message |
@@ -239,10 +247,13 @@ reported in a banner rather than silently breaking your keyboard.
 
 ## Slash commands
 
-Typed into the composer, for the things that need an argument.
+Typed into the composer, for the things that need an argument. `/community`
+opens the switcher; `/community add <name> <relay> [gateway]` saves and opens
+another community; `/community use <name>` switches directly.
 
-`/join` `/create` `/leave` `/dm` `/invite` `/kick` `/topic` `/relay` `/search`
-`/theme` `/mute` `/pin` `/read` `/me` `/whoami` `/reload` `/keys` `/quit`
+`/join` `/create` `/leave` `/dm` `/invite` `/kick` `/topic` `/community`
+`/relay` `/search` `/theme` `/mute` `/pin` `/read` `/me` `/whoami` `/reload`
+`/keys` `/quit`
 
 ## Direct messages
 

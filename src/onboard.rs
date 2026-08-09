@@ -15,7 +15,7 @@ use nostr::key::Keys;
 use nostr::nips::nip19::ToBech32;
 use nostr::types::RelayUrl;
 
-use crate::config::{self, Config, Paths};
+use crate::config::{self, Community, Config, Paths};
 
 /// Where the identity came from. An identity that was already on disk is kept
 /// distinct so that setup never treats reconfiguring a community as a reason to
@@ -67,7 +67,10 @@ pub fn run(paths: &Paths, config: &mut Config) -> Result<()> {
         .unwrap_or_else(|_| keys.public_key().to_hex());
 
     println!("\nsetup complete");
-    println!("  community  {}", config.relay);
+    let (name, community) = config
+        .current_community()
+        .expect("setup just stored a community");
+    println!("  community  {name} ({})", community.relay);
     println!("  identity   {npub}");
     println!("  files      {}", paths.root.display());
 
@@ -100,13 +103,21 @@ pub fn run(paths: &Paths, config: &mut Config) -> Result<()> {
 pub fn prompt_community(paths: &Paths, config: &mut Config) -> Result<()> {
     let gateway = prompt_gateway(config)?;
     let suggested = relay_from_gateway(&gateway);
-    config.relay = prompt_relay(&suggested)?;
+    let relay = prompt_relay(&suggested)?;
+    let name = prompt_line(
+        "community name",
+        Some(&config::suggested_community_name(&relay)),
+    )?;
 
     // Only record a gateway that is not simply the relay's own host; carrying a
     // redundant one would silently break if the relay later moves.
-    let derived = config.http_origin_from_relay();
-    config.gateway = (!gateway.is_empty() && gateway != derived).then_some(gateway);
-
+    let mut community = Community {
+        relay,
+        gateway: None,
+    };
+    let derived = community.http_origin_from_relay();
+    community.gateway = (!gateway.is_empty() && gateway != derived).then_some(gateway);
+    config.upsert_community(&name, community)?;
     config.save(paths)
 }
 
@@ -114,9 +125,9 @@ pub fn prompt_community(paths: &Paths, config: &mut Config) -> Result<()> {
 /// from unless a deployment splits them.
 fn prompt_gateway(config: &Config) -> Result<String> {
     let current = config
-        .gateway
-        .clone()
-        .filter(|g| !g.is_empty())
+        .current_community()
+        .and_then(|(_, community)| community.gateway.clone())
+        .filter(|gateway| !gateway.is_empty())
         .or_else(|| config.has_community().then(|| config.http_origin()))
         .unwrap_or_default();
 

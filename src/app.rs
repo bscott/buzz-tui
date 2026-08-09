@@ -22,7 +22,7 @@ use nostr::types::Timestamp;
 use tracing::{debug, warn};
 
 use crate::composer::Composer;
-use crate::config::{Config, Paths};
+use crate::config::{Community, Config, Paths};
 use crate::keys::{Action, Chord, Keymap, Resolution, Scope};
 use crate::media::{Media, MediaEvent};
 use crate::model::{Channel, ChannelKind, Delivery, Message, Presence, Profile};
@@ -851,6 +851,7 @@ impl App {
             }
             Action::MarkAllRead => self.mark_all_read(),
             Action::OpenSwitcher => self.open_switcher(),
+            Action::OpenCommunitySwitcher => self.open_community_switcher(),
             Action::OpenSearch => {
                 self.overlay = Some(Overlay::Search(Search::new(self.active.clone())))
             }
@@ -1499,7 +1500,7 @@ impl App {
         let npub = self.npub();
         let request = format!(
             "Please add me to the Buzz relay at {}.\n\nMy public key:\n{npub}\n\nTo add me:\n  buzz-admin add-member --pubkey {npub}\n",
-            self.config.relay,
+            self.config.relay(),
         );
         match arboard::Clipboard::new().and_then(|mut c| c.set_text(request)) {
             Ok(()) => self.toast(
@@ -1654,6 +1655,29 @@ impl App {
             items,
         )));
     }
+    fn open_community_switcher(&mut self) {
+        let current = self
+            .config
+            .current_community()
+            .map(|(name, _)| name.to_string())
+            .unwrap_or_default();
+        let items = self
+            .config
+            .communities
+            .iter()
+            .map(|(name, community)| PickerItem {
+                id: name.clone(),
+                label: name.clone(),
+                detail: Some(community.relay.clone()),
+                badge: (name == &current).then(|| "current".to_string()),
+            })
+            .collect();
+        self.overlay = Some(Overlay::Picker(Picker::new(
+            PickerKind::Community,
+            "switch community",
+            items,
+        )));
+    }
 
     fn toggle_mute(&mut self) {
         let Some(channel) = self.active_channel().cloned() else {
@@ -1704,7 +1728,26 @@ impl App {
         match Config::load_or_create(&paths) {
             Ok(mut config) => {
                 config.apply_env();
-                let relay_changed = config.relay != self.config.relay;
+                let relay_changed = config.relay() != self.config.relay();
+                let prepared = if relay_changed {
+                    let Some((name, community)) = config
+                        .current_community()
+                        .map(|(name, community)| (name.to_string(), community.clone()))
+                    else {
+                        self.error("could not reload configuration", "no current community");
+                        return;
+                    };
+                    let store = match self.open_community_store(&community) {
+                        Ok(store) => store,
+                        Err(err) => {
+                            self.error("could not open community", err.to_string());
+                            return;
+                        }
+                    };
+                    Some((name, community, store))
+                } else {
+                    None
+                };
                 let (palette, mut problems) = build_palette(&config);
                 self.palette = palette;
                 self.config = config;
@@ -1715,8 +1758,8 @@ impl App {
                 problems.extend(keymap.diagnostics.iter().cloned());
                 self.keymap = keymap;
                 self.diagnostics = problems;
-                if relay_changed {
-                    self.relay.send(Command::Switch(self.config.relay.clone()));
+                if let Some((name, community, store)) = prepared {
+                    self.install_community(&name, &community, store);
                 }
                 self.info("configuration reloaded");
             }
@@ -1729,6 +1772,7 @@ impl App {
     fn submit(&mut self, submission: Submission) {
         match submission {
             Submission::OpenChannel(id) => self.open_channel(&id),
+            Submission::SwitchCommunity(name) => self.switch_community(&name),
             Submission::React(emoji) => self.react(&emoji),
             Submission::JumpToMessage { channel, id } => {
                 self.open_channel(&channel);
@@ -1850,13 +1894,118 @@ impl App {
         }
     }
 
-    fn switch_relay(&mut self, url: &str) {
-        self.config.relay = url.to_string();
-        if let Err(err) = self.config.save(&self.paths) {
-            debug!(%err, "could not persist the relay");
+    fn open_community_store(&self, community: &Community) -> Result<Arc<Store>> {
+        self.paths.ensure_community(&self.me, &community.relay)?;
+        let path = self.paths.db_for(&self.me, &community.relay);
+        Ok(Arc::new(Store::open(&path, &self.me, &community.relay)?))
+    }
+
+    fn install_community(&mut self, name: &str, community: &Community, store: Arc<Store>) {
+        self.store = store.clone();
+        self.media
+            .switch_cache(self.paths.media_for(&self.me, &community.relay), store);
+        self.channels.clear();
+        self.sidebar_cursor = 0;
+        self.active = None;
+        self.timeline.clear();
+        self.selected = None;
+        self.scroll = 0;
+        self.follow = true;
+        self.thread_root = None;
+        self.thread_selected = None;
+        self.thread_scroll = 0;
+        self.thread_follow = true;
+        self.profiles.clear();
+        self.parents.clear();
+        self.members.clear();
+        self.presence.clear();
+        self.typing.clear();
+        self.pending_wraps.clear();
+        self.last_typing = None;
+        self.last_presence = None;
+        self.composer.clear();
+        self.compose_mode = ComposeMode::New;
+        self.overlay = None;
+        self.conn = ConnState::Connecting;
+        self.relay.send(Command::Switch(community.relay.clone()));
+        self.reload_channels();
+        self.reload_profiles();
+        self.subscribe_baseline();
+        self.info(format!("switching to {name}"));
+    }
+
+    fn switch_community(&mut self, name: &str) {
+        let Some(community) = self.config.communities.get(name).cloned() else {
+            self.error("unknown community", name.to_string());
+            return;
+        };
+        let store = match self.open_community_store(&community) {
+            Ok(store) => store,
+            Err(err) => {
+                self.error("could not open community", err.to_string());
+                return;
+            }
+        };
+        let previous = self.config.clone();
+        if let Err(err) = self
+            .config
+            .activate(name)
+            .and_then(|()| self.config.save(&self.paths))
+        {
+            self.config = previous;
+            self.error("could not save community", err.to_string());
+            return;
         }
-        self.relay.send(Command::Switch(url.to_string()));
-        self.info(format!("switching to {url}"));
+        self.install_community(name, &community, store);
+    }
+
+    /// Adds a named community and switches to it. A bare relay remains useful
+    /// for the old `/relay wss://…` form and derives its name from the host.
+    fn switch_relay(&mut self, spec: &str) {
+        let fields: Vec<&str> = spec.split_whitespace().collect();
+        let (name, relay, gateway) = match fields.as_slice() {
+            [relay] => (
+                crate::config::suggested_community_name(relay),
+                (*relay).to_string(),
+                None,
+            ),
+            [name, relay] => ((*name).to_string(), (*relay).to_string(), None),
+            [name, relay, gateway] => (
+                (*name).to_string(),
+                (*relay).to_string(),
+                Some((*gateway).to_string()),
+            ),
+            _ => {
+                self.error(
+                    "community needs a name and relay",
+                    "usage: /community add <name> <wss://relay> [https://gateway]",
+                );
+                return;
+            }
+        };
+        let community = Community { relay, gateway };
+        let mut config = self.config.clone();
+        if let Err(err) = config.upsert_community(&name, community.clone()) {
+            self.error("invalid community", err.to_string());
+            return;
+        }
+        let community = config
+            .current_community()
+            .map(|(_, community)| community.clone())
+            .expect("upsert stored the community");
+        let store = match self.open_community_store(&community) {
+            Ok(store) => store,
+            Err(err) => {
+                self.error("could not open community", err.to_string());
+                return;
+            }
+        };
+        if let Err(err) = config.save(&self.paths) {
+            self.error("could not save community", err.to_string());
+            return;
+        }
+        self.config = config;
+        self.install_community(&name, &community, store);
     }
 
     fn set_topic(&mut self, topic: &str) {
@@ -1920,12 +2069,25 @@ impl App {
                     self.set_topic(rest)
                 }
             }
+            "community" | "communities" => {
+                let mut args = rest.split_whitespace();
+                match (args.next(), args.collect::<Vec<_>>()) {
+                    (None, _) | (Some("list"), _) => self.dispatch(Action::OpenCommunitySwitcher),
+                    (Some("use"), names) if names.len() == 1 => self.switch_community(names[0]),
+                    (Some("add"), fields) if fields.is_empty() => {
+                        self.overlay = Some(Overlay::Prompt(Prompt::new(PromptKind::SetRelay)))
+                    }
+                    (Some("add"), fields) => self.switch_relay(&fields.join(" ")),
+                    (Some(name), fields) if fields.is_empty() => self.switch_community(name),
+                    _ => self.error(
+                        "invalid community command",
+                        "usage: /community [list|use <name>|add <name> <relay> [gateway]]",
+                    ),
+                }
+            }
             "relay" => {
                 if rest.is_empty() {
-                    self.overlay = Some(Overlay::Prompt(Prompt::with_value(
-                        PromptKind::SetRelay,
-                        self.config.relay.clone(),
-                    )))
+                    self.overlay = Some(Overlay::Prompt(Prompt::new(PromptKind::SetRelay)))
                 } else {
                     self.switch_relay(rest)
                 }
@@ -2033,9 +2195,16 @@ impl App {
                 }
             }
             Update::Event {
+                relay,
                 subscription,
                 event,
-            } => self.ingest(&subscription, *event),
+            } => {
+                if relay == self.config.relay() {
+                    self.ingest(&subscription, *event);
+                } else {
+                    debug!(%relay, "discarded a late event from the previous community");
+                }
+            }
             Update::EndOfStored(subscription) => {
                 if subscription == SUB_DISCOVERY {
                     self.reload_channels();

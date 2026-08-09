@@ -240,10 +240,13 @@ impl Role {
     }
 }
 
-/// Extracts the roster from a kind:39001 (admins) or kind:39002 (members)
-/// event. Admin events carry the role as the third tag element; member events
-/// list everyone without a role.
+/// Extracts entries from a kind:39001 (admins) or kind:39002 (members)
+/// event. Role labels in an admin event are relay-defined; every listed key is
+/// therefore at least an administrator, while the conventional `owner` label
+/// retains its stronger presentation. A member event carries no roles and may
+/// expose only a subset of the complete membership.
 pub fn roster_from_event(event: &Event) -> Vec<Member> {
+    let admins = event.kind.as_u16() == kinds::GROUP_ADMINS;
     event
         .tags
         .iter()
@@ -254,7 +257,14 @@ pub fn roster_from_event(event: &Event) -> Vec<Member> {
             if pubkey.len() != 64 {
                 return None;
             }
-            let role = parts.get(2).map(|r| Role::parse(r)).unwrap_or(Role::Member);
+            let role = if admins {
+                match parts.get(2).map(String::as_str) {
+                    Some("owner") => Role::Owner,
+                    _ => Role::Admin,
+                }
+            } else {
+                Role::Member
+            };
             Some(Member { pubkey, role })
         })
         .collect()
@@ -378,19 +388,25 @@ mod tests {
     }
 
     #[test]
-    fn roster_reads_roles_and_rejects_malformed_pubkeys() {
+    fn roster_reads_standard_and_custom_admin_roles() {
         let owner = "1".repeat(64);
+        let moderator = "2".repeat(64);
+        let unlabeled = "3".repeat(64);
         let ev = event(
             kinds::GROUP_ADMINS,
             vec![
                 Tag::parse(["d", "chan"]).unwrap(),
                 Tag::parse(["p", &owner, "owner"]).unwrap(),
-                Tag::parse(["p", "too-short"]).unwrap(),
+                Tag::parse(["p", &moderator, "moderator"]).unwrap(),
+                Tag::parse(["p", &unlabeled]).unwrap(),
+                Tag::parse(["p", "too-short", "ceo"]).unwrap(),
             ],
             "",
         );
         let roster = roster_from_event(&ev);
-        assert_eq!(roster.len(), 1);
+        assert_eq!(roster.len(), 3);
         assert_eq!(roster[0].role, Role::Owner);
+        assert_eq!(roster[1].role, Role::Admin);
+        assert_eq!(roster[2].role, Role::Admin);
     }
 }

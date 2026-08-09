@@ -216,6 +216,10 @@ fn composer_height(app: &App, width: u16) -> u16 {
 fn render_header(frame: &mut Frame, area: Rect, app: &App, narrow: bool) {
     let palette = &app.palette;
     let mut left: Vec<Span> = Vec::new();
+    if let Some((name, _)) = app.config.current_community() {
+        left.push(Span::styled(format!(" {name} "), palette.accent_text()));
+        left.push(Span::styled("\u{203a}", palette.dim()));
+    }
 
     match app.active_channel() {
         Some(channel) => {
@@ -279,12 +283,18 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, narrow: bool) {
             ));
         }
         _ if !narrow => {
-            let host = app
+            let (name, relay) = app
                 .config
-                .relay
+                .current_community()
+                .map(|(name, community)| (name, community.relay.as_str()))
+                .unwrap_or(("none", ""));
+            let host = relay
                 .trim_start_matches("wss://")
                 .trim_start_matches("ws://");
-            right.push(Span::styled(format!("  {host} "), palette.pending()));
+            right.push(Span::styled(
+                format!("  {name} \u{00b7} {host} "),
+                palette.pending(),
+            ));
         }
         _ => right.push(Span::raw(" ")),
     }

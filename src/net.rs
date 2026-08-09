@@ -26,6 +26,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{debug, warn};
 
+use crate::config::relay_identity;
 /// Buzz relays cap frames at 64 KiB; refuse to build anything larger locally
 /// rather than having the connection torn down for a protocol violation.
 const MAX_FRAME: usize = 64 * 1024;
@@ -78,6 +79,7 @@ pub enum Command {
 pub enum Update {
     State(ConnState),
     Event {
+        relay: String,
         subscription: String,
         event: Box<Event>,
     },
@@ -146,17 +148,20 @@ pub fn spawn(relay_url: String, keys: Keys) -> (Relay, UnboundedReceiver<Update>
 }
 
 /// Subscriptions and pending publishes survive across reconnects; the socket
-/// itself does not, so it is created fresh inside each session.
+/// itself does not, so it is created fresh inside each session. Publishes are
+/// partitioned by relay so switching communities cannot either leak or lose an
+/// offline message.
 struct Connection {
     url: String,
+    outbox_key: String,
     keys: Keys,
     commands: UnboundedReceiver<Command>,
     updates: UnboundedSender<Update>,
     subscriptions: HashMap<String, (Vec<Filter>, bool)>,
-    /// Signed events awaiting a successful write. An entry is removed only
-    /// after the socket has accepted it, so a write that fails mid-queue leaves
-    /// the event and everything behind it to be retried on the next session.
+    /// Signed events awaiting a successful write to the active relay.
     outbox: VecDeque<Event>,
+    /// Queues belonging to relays other than `url`, restored when revisited.
+    parked_outboxes: HashMap<String, VecDeque<Event>>,
     backoff: Duration,
 }
 
@@ -177,13 +182,16 @@ impl Connection {
         commands: UnboundedReceiver<Command>,
         updates: UnboundedSender<Update>,
     ) -> Self {
+        let outbox_key = relay_identity(&url);
         Self {
             url,
+            outbox_key,
             keys,
             commands,
             updates,
             subscriptions: HashMap::new(),
             outbox: VecDeque::new(),
+            parked_outboxes: HashMap::new(),
             backoff: BACKOFF_MIN,
         }
     }
@@ -194,6 +202,26 @@ impl Connection {
         self.subscriptions.remove(id).is_some()
     }
 
+    /// Moves the connection's volatile state to another relay boundary.
+    /// Subscriptions can be rebuilt by the app. Pending publishes are parked
+    /// under their normalized relay and restored if the user switches back.
+    fn switch_to(&mut self, url: String) {
+        let next_key = relay_identity(&url);
+        if next_key != self.outbox_key {
+            if !self.outbox.is_empty() {
+                self.parked_outboxes
+                    .entry(self.outbox_key.clone())
+                    .or_default()
+                    .append(&mut self.outbox);
+            }
+            self.outbox = self.parked_outboxes.remove(&next_key).unwrap_or_default();
+            self.outbox_key = next_key;
+        }
+        self.url = url;
+        self.subscriptions.clear();
+        self.backoff = BACKOFF_MIN;
+    }
+
     async fn run(mut self) {
         loop {
             self.emit(Update::State(ConnState::Connecting));
@@ -202,11 +230,7 @@ impl Connection {
                     self.emit(Update::State(ConnState::Offline));
                     return;
                 }
-                Exit::Switch(url) => {
-                    self.url = url;
-                    self.subscriptions.clear();
-                    self.backoff = BACKOFF_MIN;
-                }
+                Exit::Switch(url) => self.switch_to(url),
                 Exit::Retry(reason) => {
                     warn!(relay = %self.url, %reason, "relay session ended");
                     self.emit(Update::State(ConnState::Failed(reason)));
@@ -235,9 +259,7 @@ impl Connection {
                     Some(Command::Shutdown) | None => return false,
                     // Reconnect immediately when redirected; the user is waiting.
                     Some(Command::Switch(url)) => {
-                        self.url = url;
-                        self.subscriptions.clear();
-                        self.backoff = BACKOFF_MIN;
+                        self.switch_to(url);
                         return true;
                     }
                     Some(other) => self.stage(other),
@@ -369,6 +391,7 @@ impl Connection {
                                 continue;
                             }
                             self.emit(Update::Event {
+                                relay: self.url.clone(),
                                 subscription: subscription_id.to_string(),
                                 event: Box::new(event),
                             });
@@ -443,6 +466,7 @@ impl Connection {
             }
             Command::Switch(url) => {
                 let _ = sink.send(WsMessage::Close(None)).await;
+                self.switch_to(url.clone());
                 Some(Exit::Switch(url))
             }
             Command::Publish(event) => {
@@ -656,6 +680,67 @@ mod tests {
         assert!(conn.outbox.is_empty());
         assert!(sink.written[0].contains("third"));
         assert!(sink.written[1].contains("fourth"));
+    }
+
+    #[tokio::test]
+    async fn switching_relays_parks_and_restores_each_relays_outbox() {
+        let keys = Keys::generate();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let (utx, _urx) = mpsc::unbounded_channel();
+        let mut conn = Connection::new("ws://one.example".into(), keys.clone(), rx, utx);
+        conn.stage(Command::Publish(Box::new(chat(
+            &keys,
+            "private to community one",
+        ))));
+        assert_eq!(conn.outbox.len(), 1);
+
+        let mut control_sink = FlakySink {
+            remaining: 8,
+            written: Vec::new(),
+        };
+        let mut expected_closes = HashSet::new();
+        let exit = conn
+            .handle_command(
+                Command::Switch("ws://two.example".into()),
+                false,
+                &mut expected_closes,
+                &mut control_sink,
+            )
+            .await;
+        assert!(matches!(exit, Some(Exit::Switch(_))));
+
+        let mut new_relay = FlakySink {
+            remaining: 8,
+            written: Vec::new(),
+        };
+        conn.replay(&mut new_relay).await.unwrap();
+        assert!(
+            new_relay.written.is_empty(),
+            "old event leaked to the new relay: {:?}",
+            new_relay.written
+        );
+        assert!(conn.outbox.is_empty());
+
+        // The trailing slash normalizes to the original relay key, so returning
+        // restores and delivers the event rather than stranding it.
+        let exit = conn
+            .handle_command(
+                Command::Switch("ws://one.example/".into()),
+                false,
+                &mut expected_closes,
+                &mut control_sink,
+            )
+            .await;
+        assert!(matches!(exit, Some(Exit::Switch(_))));
+        let mut original_relay = FlakySink {
+            remaining: 8,
+            written: Vec::new(),
+        };
+        conn.replay(&mut original_relay).await.unwrap();
+        assert_eq!(original_relay.written.len(), 1);
+        assert!(original_relay.written[0].contains("private to community one"));
+        assert!(conn.outbox.is_empty());
+        assert!(conn.parked_outboxes.is_empty());
     }
 
     #[test]
