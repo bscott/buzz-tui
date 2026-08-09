@@ -9,8 +9,11 @@ on:
         description: "Existing tag to build, for rehearsing a release"
         required: true
 
+# Only the job that creates the release may write to the repository. The
+# compiler, the cache, and the cross-build containers all run untrusted-ish
+# third-party code against a checkout; none of them need that power.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -135,6 +138,8 @@ jobs:
     name: publish release
     needs: [resolve, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
