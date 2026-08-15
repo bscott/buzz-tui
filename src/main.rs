@@ -1,6 +1,7 @@
 //! buzztui: a terminal client for Buzz relays.
 
 mod app;
+mod approval;
 mod composer;
 mod config;
 mod keys;

@@ -14,8 +14,9 @@ use ratatui_image::{Resize, StatefulImage};
 
 use super::{text, widgets};
 use crate::app::App;
+use crate::approval::{ChoiceKind, Request};
 use crate::media::Status;
-use crate::overlay::{Confirm, Help, Overlay, Picker, Prompt, Search};
+use crate::overlay::{Approval, Confirm, Help, Overlay, Picker, Prompt, Search};
 
 pub fn render(frame: &mut Frame, app: &mut App, overlay: &Overlay) {
     if overlay.is_modal() {
@@ -27,6 +28,7 @@ pub fn render(frame: &mut Frame, app: &mut App, overlay: &Overlay) {
         Overlay::Picker(picker) => render_picker(frame, app, picker),
         Overlay::Prompt(prompt) => render_prompt(frame, app, prompt),
         Overlay::Confirm(confirm) => render_confirm(frame, app, confirm),
+        Overlay::Approval(approval) => render_approval(frame, app, approval, &title),
         Overlay::Search(search) => render_search(frame, app, search),
         Overlay::Profile(pubkey) => render_profile(frame, app, pubkey),
         Overlay::Image(url) => render_image(frame, app, url),
@@ -281,6 +283,85 @@ fn render_confirm(frame: &mut Frame, app: &App, confirm: &Confirm) {
         ),
         actions,
     );
+}
+
+/// An agent's permission request, with the operation quoted verbatim so the
+/// decision is made against what was actually asked rather than a paraphrase.
+fn render_approval(frame: &mut Frame, app: &App, approval: &Approval, title: &str) {
+    let palette = &app.palette;
+    let screen = frame.area();
+    let width = 66.min(screen.width.saturating_sub(4));
+
+    let (subject, detail) = match &approval.request {
+        Request::Command { command, reason } => (
+            command
+                .clone()
+                .unwrap_or_else(|| "an operation the agent did not spell out".to_string()),
+            reason.clone(),
+        ),
+        Request::Question { question, .. } => (question.clone(), None),
+    };
+
+    // The modal is sized to its contents so a long reason is not clipped and a
+    // short one leaves no dead space above the choices.
+    let inner_width = width.saturating_sub(4).max(8) as usize;
+    let subject_height = text::wrapped_height(&subject, inner_width).min(6) as u16;
+    let detail_height = detail
+        .as_deref()
+        .map(|detail| text::wrapped_height(detail, inner_width).min(5) as u16)
+        .unwrap_or(0);
+    let choices_height = approval.choices.len() as u16;
+    let height = 2 + subject_height + detail_height + 1 + choices_height;
+
+    let Some(area) = widgets::modal(frame, palette, title, width, height, Some(approval.hint()))
+    else {
+        return;
+    };
+
+    let [subject_area, detail_area, _gap, choices_area] = Layout::vertical([
+        Constraint::Length(subject_height),
+        Constraint::Length(detail_height),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+
+    frame.render_widget(
+        Paragraph::new(subject.as_str())
+            .style(palette.strong())
+            .wrap(Wrap { trim: true }),
+        subject_area,
+    );
+    if let Some(detail) = detail.as_deref() {
+        frame.render_widget(
+            Paragraph::new(detail)
+                .style(palette.dim())
+                .wrap(Wrap { trim: true }),
+            detail_area,
+        );
+    }
+
+    let rows: Vec<Line> = approval
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            let chosen = index == approval.selected;
+            // Granting is styled as a warning even when selected: the colour is
+            // part of the information, not decoration.
+            let style = match (chosen, choice.kind) {
+                (true, ChoiceKind::Deny) => palette.chip(),
+                (true, _) => palette.warn().add_modifier(Modifier::REVERSED),
+                (false, _) => Style::new().fg(palette.subtext0),
+            };
+            Line::from(vec![
+                Span::styled(if chosen { " > " } else { "   " }, style),
+                Span::styled(format!("{} ", index + 1), palette.dim()),
+                Span::styled(format!("{} ", choice.label), style),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), choices_area);
 }
 
 fn render_search(frame: &mut Frame, app: &App, search: &Search) {

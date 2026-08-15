@@ -5,7 +5,7 @@
 //! reads this struct and writes nothing back except viewport measurements, which
 //! it alone can know.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,7 @@ use nostr::types::Timestamp;
 use semver::Version;
 use tracing::{debug, warn};
 
+use crate::approval::Request as ApprovalRequest;
 use crate::composer::{Composer, token_start};
 use crate::config::{Community, Config, Paths};
 use crate::keys::{Action, Chord, Keymap, Resolution, Scope};
@@ -29,8 +30,8 @@ use crate::media::{Media, MediaEvent};
 use crate::model::{Channel, ChannelKind, Delivery, Message, Presence, Profile};
 use crate::net::{Command, ConnState, Relay, Update};
 use crate::overlay::{
-    Confirm, Confirmation, Help, Outcome, Overlay, Picker, PickerItem, PickerKind, Prompt,
-    PromptKind, Search, Submission,
+    Approval, Confirm, Confirmation, Help, Outcome, Overlay, Picker, PickerItem, PickerKind,
+    Prompt, PromptKind, Search, Submission,
 };
 use crate::proto::{self, kinds};
 use crate::store::{self, Ingested, Store};
@@ -130,6 +131,21 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "read",
         args: "",
         help: "mark this channel read",
+    },
+    SlashCommand {
+        name: "approve",
+        args: "",
+        help: "approve an agent's pending request",
+    },
+    SlashCommand {
+        name: "deny",
+        args: "",
+        help: "refuse an agent's pending request",
+    },
+    SlashCommand {
+        name: "approvals",
+        args: "[revoke]",
+        help: "list or withdraw standing approvals",
     },
     SlashCommand {
         name: "me",
@@ -277,6 +293,14 @@ pub struct App {
     last_presence: Option<Instant>,
 
     pub overlay: Option<Overlay>,
+    /// Approval requests that arrived while another overlay held the screen.
+    /// They queue rather than interrupt, because an agent is waiting on each one
+    /// and a dropped request looks to it like silence.
+    pending_approvals: VecDeque<Approval>,
+    /// Agents allowed to proceed unattended for the rest of this session. The
+    /// grant is deliberately not persisted: a standing permission to run
+    /// dangerous commands should not outlive the sitting that granted it.
+    approval_grants: HashSet<String>,
     pub toasts: Vec<Toast>,
     /// Configuration problems, shown as an in-band banner instead of a crash.
     pub diagnostics: Vec<String>,
@@ -364,6 +388,8 @@ impl App {
             last_typing: None,
             last_presence: None,
             overlay: None,
+            pending_approvals: VecDeque::new(),
+            approval_grants: HashSet::new(),
             toasts: Vec::new(),
             diagnostics,
             conn: ConnState::Offline,
@@ -839,11 +865,13 @@ impl App {
                 }
                 Outcome::Close => {
                     self.overlay = None;
+                    self.open_next_approval();
                     return;
                 }
                 Outcome::Submit(submission) => {
                     self.overlay = None;
                     self.submit(submission);
+                    self.open_next_approval();
                     return;
                 }
                 Outcome::Ignored => {}
@@ -869,6 +897,14 @@ impl App {
                     self.pending.clear();
                     self.hints.clear();
                     return;
+                }
+                // A letter that means nothing while browsing a thread is far
+                // more likely to be the start of a reply than a mistake, so it
+                // opens the composer rather than being discarded.
+                if self.focus == Focus::Thread
+                    && matches!(key.code, crossterm::event::KeyCode::Char(_))
+                {
+                    self.focus_composer();
                 }
                 if self.focus == Focus::Composer
                     && let crossterm::event::KeyCode::Char(c) = key.code
@@ -952,7 +988,16 @@ impl App {
             Action::Redraw => {}
 
             Action::FocusComposer => self.focus_composer(),
-            Action::FocusTimeline => self.focus = Focus::Timeline,
+            // Stepping out of a reply lands in the thread it was addressed
+            // from rather than the channel behind it, so leaving the composer
+            // and closing the thread stay separate presses.
+            Action::FocusTimeline => {
+                self.focus = if self.focus == Focus::Composer && self.thread_root.is_some() {
+                    Focus::Thread
+                } else {
+                    Focus::Timeline
+                }
+            }
             Action::FocusSidebar => self.focus = Focus::Sidebar,
             Action::CycleFocus => {
                 if self.focus == Focus::Thread {
@@ -1785,7 +1830,12 @@ impl App {
         self.thread_root = Some(root);
         self.thread_scroll = 0;
         self.thread_follow = true;
+        // Opening a thread is nearly always the prelude to answering it, so the
+        // composer takes the keyboard with the reply already addressed. Browsing
+        // the thread is one `esc` away, which is where its navigation keys live;
+        // landing in that mode instead would swallow the first thing typed.
         self.focus = Focus::Thread;
+        self.focus_composer();
     }
 
     fn close_thread(&mut self) {
@@ -2042,7 +2092,112 @@ impl App {
             Submission::InsertCommand(command) => self.insert_command(&command),
             Submission::Prompt { kind, value } => self.run_prompt(kind, &value),
             Submission::Confirmed(action) => self.run_confirmed(action),
+            Submission::Answered {
+                channel,
+                agent,
+                reply,
+                remember,
+            } => self.answer_approval(&channel, &agent, &reply, remember),
         }
+    }
+
+    /// Publishes an answer to an agent's request, and records a standing grant
+    /// when one was asked for.
+    fn answer_approval(&mut self, channel: &str, agent: &str, reply: &str, remember: bool) {
+        if remember {
+            self.approval_grants.insert(agent.to_string());
+            let name = self.display_name(agent);
+            self.info(format!(
+                "{name} may now proceed without asking, until buzztui closes"
+            ));
+        }
+        self.say(channel, reply);
+    }
+
+    /// Sends a line of text to a channel on the user's behalf, taking the same
+    /// route their own message would: a gift wrap for a conversation, a plain
+    /// event for a room.
+    fn say(&mut self, channel: &str, body: &str) {
+        if let Some(peer) = store::direct_peer(channel).map(str::to_string) {
+            if let Err(err) = self.send_direct(&peer, channel, body, None) {
+                self.error("could not answer", err.to_string());
+            }
+        } else {
+            match self.build_message(channel, body) {
+                Ok(event) => {
+                    if let Err(err) = self.store.record_outgoing(&event, channel) {
+                        debug!(%err, "could not record the local echo");
+                    }
+                    self.relay.publish(event);
+                }
+                Err(err) => {
+                    self.error("could not answer", err.to_string());
+                    return;
+                }
+            }
+        }
+        if self.active.as_deref() == Some(channel) {
+            self.follow = true;
+            self.scroll = 0;
+        }
+        self.reload_timeline();
+        self.reload_channels();
+    }
+
+    /// Notices an agent asking for permission and decides whether to interrupt.
+    ///
+    /// A grant covers only the `/approve`-style requests, whose answer is a
+    /// fixed token; a menu is a genuine choice between alternatives and always
+    /// waits for a person.
+    fn note_approval_request(&mut self, event: &Event, channel: &str) {
+        let Some(request) = ApprovalRequest::parse(&event.content) else {
+            return;
+        };
+        let agent_key = event.pubkey.to_hex();
+        let agent = self.display_name(&agent_key);
+
+        if request.grantable() && self.approval_grants.contains(&agent_key) {
+            let summary = crate::ui::text::truncate_end(request.summary(), 48).into_owned();
+            self.toast(
+                ToastKind::Info,
+                format!("approved {summary} for {agent}"),
+                Some(
+                    "a standing grant answered this; /approvals revoke to withdraw it".to_string(),
+                ),
+            );
+            self.say(channel, "/approve");
+            return;
+        }
+
+        self.pending_approvals
+            .push_back(Approval::new(request, agent, agent_key, channel));
+        self.open_next_approval();
+    }
+
+    /// Shows the next queued request, once nothing else owns the screen.
+    fn open_next_approval(&mut self) {
+        if self.overlay.is_some() {
+            return;
+        }
+        if let Some(approval) = self.pending_approvals.pop_front() {
+            self.overlay = Some(Overlay::Approval(approval));
+            self.dirty = true;
+        }
+    }
+
+    /// Withdraws every standing grant, for when one turns out to have been a
+    /// mistake and the agent is still mid-run.
+    fn revoke_approval_grants(&mut self) {
+        if self.approval_grants.is_empty() {
+            self.info("no agent has a standing approval");
+            return;
+        }
+        let revoked = self.approval_grants.len();
+        self.approval_grants.clear();
+        self.info(format!(
+            "revoked {revoked} standing approval{}; agents will ask again",
+            if revoked == 1 { "" } else { "s" }
+        ));
     }
 
     fn jump_to_message(&mut self, channel: &str, id: &str) {
@@ -2429,6 +2584,32 @@ impl App {
             }
             "update" if rest.eq_ignore_ascii_case("install") => self.request_update_install(),
             "update" => self.error("invalid update command", "usage: /update [install]"),
+            // These are not buzztui's words but the agent's: they have to reach
+            // the room verbatim, which is exactly what the unknown-command arm
+            // below used to prevent.
+            "approve" | "deny" => match self.active.clone() {
+                Some(channel) => {
+                    let token = format!("/{name}");
+                    self.say(&channel, &token);
+                }
+                None => self.error("no channel open", "open the channel the agent asked in"),
+            },
+            "approvals" => match rest {
+                "" | "list" => {
+                    if self.approval_grants.is_empty() {
+                        self.info("no agent has a standing approval");
+                    } else {
+                        let names: Vec<String> = self
+                            .approval_grants
+                            .iter()
+                            .map(|agent| self.display_name(agent))
+                            .collect();
+                        self.info(format!("proceeding unattended: {}", names.join(", ")));
+                    }
+                }
+                "revoke" | "clear" => self.revoke_approval_grants(),
+                _ => self.error("invalid approvals command", "usage: /approvals [revoke]"),
+            },
             "" => {}
             other => self.error(
                 format!("unknown command /{other}"),
@@ -2628,6 +2809,15 @@ impl App {
             }
         }
         self.reload_channels();
+
+        // An agent blocked on a permission answer interrupts wherever it asked,
+        // since it makes no progress until someone replies.
+        if let Ingested::Message { channel, .. } = &outcome
+            && !self.is_me(&event.pubkey.to_hex())
+        {
+            let channel = channel.clone();
+            self.note_approval_request(&event, &channel);
+        }
 
         // A message from someone else in a channel we are not looking at is the
         // only thing worth interrupting for, and only if it names us.
@@ -3131,6 +3321,10 @@ mod tests {
         assert!(names.contains(&"update"));
         assert!(names.contains(&"community"));
         assert!(names.contains(&"invite"));
+        // An agent listens for these two verbatim, so they have to be commands
+        // buzztui forwards rather than ones it rejects as unknown.
+        assert!(names.contains(&"approve"));
+        assert!(names.contains(&"deny"));
     }
 
     #[test]

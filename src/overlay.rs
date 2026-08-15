@@ -1,4 +1,5 @@
-//! Modal overlays: the switcher, search, prompts, confirmations, and help.
+//! Modal overlays: the switcher, search, prompts, confirmations, approvals,
+//! and help.
 //!
 //! Overlays own the keyboard while they are open. Their keys are deliberately
 //! not part of the rebindable keymap: a picker where `enter` might not accept
@@ -11,6 +12,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use semver::Version;
 
+use crate::approval::{Choice, ChoiceKind, Request};
 use crate::composer::token_start;
 use crate::keys::{Group, Keymap};
 use crate::model::Message;
@@ -34,11 +36,27 @@ pub enum Submission {
     OpenChannel(String),
     SwitchCommunity(String),
     React(String),
-    JumpToMessage { channel: String, id: String },
+    JumpToMessage {
+        channel: String,
+        id: String,
+    },
     InsertMention(String),
     InsertCommand(String),
-    Prompt { kind: PromptKind, value: String },
+    Prompt {
+        kind: PromptKind,
+        value: String,
+    },
     Confirmed(Confirmation),
+    /// An answer to an agent's approval request, ready to be published.
+    Answered {
+        channel: String,
+        /// The agent that asked, so a standing grant knows whom it covers.
+        agent: String,
+        /// The literal text the agent is waiting for.
+        reply: String,
+        /// Whether later requests from this agent should skip the modal.
+        remember: bool,
+    },
 }
 
 /// What a single-line prompt is collecting.
@@ -118,6 +136,7 @@ pub enum Overlay {
     Picker(Picker),
     Prompt(Prompt),
     Confirm(Confirm),
+    Approval(Approval),
     Search(Search),
     Profile(String),
     Image(String),
@@ -136,6 +155,7 @@ impl Overlay {
             Overlay::Picker(picker) => picker.title.clone(),
             Overlay::Prompt(prompt) => prompt.kind.title().to_string(),
             Overlay::Confirm(_) => "confirm".to_string(),
+            Overlay::Approval(approval) => format!("{} needs approval", approval.agent),
             Overlay::Search(_) => "search".to_string(),
             Overlay::Profile(_) => "profile".to_string(),
             Overlay::Image(_) => "image".to_string(),
@@ -148,6 +168,7 @@ impl Overlay {
             Overlay::Picker(picker) => picker.handle(key),
             Overlay::Prompt(prompt) => prompt.handle(key),
             Overlay::Confirm(confirm) => confirm.handle(key),
+            Overlay::Approval(approval) => approval.handle(key),
             Overlay::Search(search) => search.handle(key),
             Overlay::Profile(_) | Overlay::Image(_) => match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Outcome::Close,
@@ -554,6 +575,107 @@ impl Confirm {
     }
 }
 
+// ----------------------------------------------------------------- approval
+
+/// An agent's pending request for permission.
+///
+/// The answer travels back as an ordinary message, because that is the only
+/// channel the agent is listening on, so this modal is a spelling aid for a
+/// reply you would otherwise have to type exactly right.
+#[derive(Debug)]
+pub struct Approval {
+    pub request: Request,
+    /// How the requester is named on screen.
+    pub agent: String,
+    /// The requester's public key, which is what a session grant is keyed by.
+    pub agent_key: String,
+    /// Where the answer has to be published to reach the agent.
+    pub channel: String,
+    pub choices: Vec<Choice>,
+    pub selected: usize,
+}
+
+impl Approval {
+    pub fn new(
+        request: Request,
+        agent: impl Into<String>,
+        agent_key: impl Into<String>,
+        channel: impl Into<String>,
+    ) -> Self {
+        let agent = agent.into();
+        let choices = request.choices(&agent);
+        // Refusal starts selected for the reason the confirmation modal starts
+        // on "no": a reflexive enter must never widen what an agent may do. The
+        // single-key shortcuts below keep a deliberate approval to one press.
+        let selected = choices
+            .iter()
+            .position(|choice| choice.kind == ChoiceKind::Deny)
+            .unwrap_or(0);
+        Self {
+            request,
+            agent,
+            agent_key: agent_key.into(),
+            channel: channel.into(),
+            choices,
+            selected,
+        }
+    }
+
+    /// The keys listed in the modal's footer, kept next to the handler so the
+    /// two cannot drift apart.
+    pub fn hint(&self) -> &'static str {
+        if self.choices.iter().any(|c| c.kind == ChoiceKind::Always) {
+            "a once  A always  d deny"
+        } else {
+            "1-9 choose  d deny"
+        }
+    }
+
+    fn answer(&self, index: usize) -> Outcome {
+        let Some(choice) = self.choices.get(index) else {
+            return Outcome::Consumed;
+        };
+        Outcome::Submit(Submission::Answered {
+            channel: self.channel.clone(),
+            agent: self.agent_key.clone(),
+            reply: choice.reply.clone(),
+            remember: choice.kind == ChoiceKind::Always,
+        })
+    }
+
+    fn first(&self, kind: ChoiceKind) -> Outcome {
+        match self.choices.iter().position(|choice| choice.kind == kind) {
+            Some(index) => self.answer(index),
+            None => Outcome::Consumed,
+        }
+    }
+
+    fn handle(&mut self, key: KeyEvent) -> Outcome {
+        match key.code {
+            // Dismissing answers nothing: the agent is still waiting, and the
+            // request can be reopened from the timeline.
+            KeyCode::Esc => Outcome::Close,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = self.selected.saturating_sub(1);
+                Outcome::Consumed
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected = (self.selected + 1).min(self.choices.len().saturating_sub(1));
+                Outcome::Consumed
+            }
+            KeyCode::Char(digit @ '1'..='9') => {
+                let index = digit as usize - '1' as usize;
+                self.answer(index)
+            }
+            KeyCode::Char('a') => self.first(ChoiceKind::Once),
+            KeyCode::Char('A') => self.first(ChoiceKind::Always),
+            KeyCode::Char('d') => self.first(ChoiceKind::Deny),
+            KeyCode::Enter => self.answer(self.selected),
+            _ => Outcome::Consumed,
+        }
+    }
+}
+
 // --------------------------------------------------------------------- help
 
 /// The generated keybinding reference. Rows come from the live keymap, so a
@@ -723,6 +845,106 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn approval() -> Approval {
+        let request = Request::Command {
+            command: Some("<write to AGENTS.md>".to_string()),
+            reason: Some("protected instruction file".to_string()),
+        };
+        Approval::new(request, "Hermes", "8d05c8b0", "engineering")
+    }
+
+    /// The riskiest answer must never be the one an unattended keypress gives.
+    #[test]
+    fn an_approval_opens_on_refusal() {
+        let approval = approval();
+        assert_eq!(approval.choices[approval.selected].kind, ChoiceKind::Deny);
+        let mut approval = approval;
+        assert_eq!(
+            approval.handle(key(KeyCode::Enter)),
+            Outcome::Submit(Submission::Answered {
+                channel: "engineering".to_string(),
+                agent: "8d05c8b0".to_string(),
+                reply: "/deny".to_string(),
+                remember: false,
+            })
+        );
+    }
+
+    #[test]
+    fn allowing_once_does_not_remember() {
+        let mut approval = approval();
+        let Outcome::Submit(Submission::Answered {
+            reply, remember, ..
+        }) = approval.handle(key(KeyCode::Char('a')))
+        else {
+            panic!("`a` must answer the request");
+        };
+        assert_eq!(reply, "/approve");
+        assert!(!remember, "a single allowance must not become standing");
+    }
+
+    #[test]
+    fn allowing_always_carries_the_grant() {
+        let mut approval = approval();
+        let Outcome::Submit(Submission::Answered {
+            agent,
+            reply,
+            remember,
+            ..
+        }) = approval.handle(key(KeyCode::Char('A')))
+        else {
+            panic!("`A` must answer the request");
+        };
+        assert_eq!(reply, "/approve");
+        assert_eq!(agent, "8d05c8b0", "the grant is keyed by the agent's key");
+        assert!(remember);
+    }
+
+    #[test]
+    fn a_menu_answers_by_index_and_refuses_a_standing_grant() {
+        let request = Request::Question {
+            question: "approve the write?".to_string(),
+            options: vec!["yes, write it".to_string(), "write a copy".to_string()],
+        };
+        let mut approval = Approval::new(request, "Hermes", "8d05c8b0", "engineering");
+        // Nothing to remember, so the shortcut for it must do nothing at all.
+        assert_eq!(approval.handle(key(KeyCode::Char('A'))), Outcome::Consumed);
+
+        let Outcome::Submit(Submission::Answered {
+            reply, remember, ..
+        }) = approval.handle(key(KeyCode::Char('2')))
+        else {
+            panic!("a digit must pick that option");
+        };
+        assert_eq!(reply, "2");
+        assert!(!remember);
+    }
+
+    #[test]
+    fn dismissing_an_approval_answers_nothing() {
+        let mut approval = approval();
+        assert_eq!(approval.handle(key(KeyCode::Esc)), Outcome::Close);
+    }
+
+    #[test]
+    fn an_index_beyond_the_choices_is_ignored() {
+        let mut approval = approval();
+        assert_eq!(approval.handle(key(KeyCode::Char('9'))), Outcome::Consumed);
+    }
+
+    #[test]
+    fn navigation_stays_inside_the_choices() {
+        let mut approval = approval();
+        for _ in 0..5 {
+            approval.handle(key(KeyCode::Down));
+        }
+        assert_eq!(approval.selected, approval.choices.len() - 1);
+        for _ in 0..9 {
+            approval.handle(key(KeyCode::Up));
+        }
+        assert_eq!(approval.selected, 0);
     }
 
     fn channels() -> Vec<PickerItem> {
